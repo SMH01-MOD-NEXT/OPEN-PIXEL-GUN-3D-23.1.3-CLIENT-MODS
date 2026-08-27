@@ -37,15 +37,21 @@ Optional properties:
 | `-PCMAKE_VERSION=<version>` | Overrides the default CMake 4.1.2 on a machine that has another one. |
 | `-PPHOTON_APP_ID=<id>` | Bench-only fallback AppID. Leave unset for real builds: the point of the port is that the credential is not in the APK. |
 
-The artifact:
+Every build ends by dropping the library in the project root, in the same layout
+the APK uses, so nothing has to be dug out of `build/intermediates`:
 
 ```
-opg3d/build/intermediates/stripped_native_libs/release/
-  stripReleaseDebugSymbols/out/lib/arm64-v8a/libopg3d.so
+lib/arm64-v8a/libopg3d.so             stripped   - this is what goes in the APK
+lib/arm64-v8a/libopg3d.unstripped.so  symbols    - keep for tools/symbolize_log.py
 ```
 
-Use the stripped one in the APK and keep the unstripped copy from
-`merged_native_libs/release/.../libopg3d.so` for `tools/symbolize_log.py`.
+The copy is done by `export<Variant>NativeLib`, wired to `assemble<Variant>`, so
+`assembleRelease` and `assembleDebug` each refresh their own build. The `lib/`
+directory is gitignored. To refresh it without a full assemble:
+
+```bash
+./gradlew :opg3d:exportReleaseNativeLib
+```
 
 ## 2. Put it in the APK
 
@@ -56,7 +62,7 @@ both entirely on your side of the fence:
 ```bash
 APK=pg3d-23.1.3.apk
 unzip -o "$APK" -d work >/dev/null
-cp .../libopg3d.so work/lib/arm64-v8a/libopg3d.so
+cp lib/arm64-v8a/libopg3d.so work/lib/arm64-v8a/libopg3d.so
 
 # a) if your loader already pulls it in (patched libmain.so DT_NEEDED, or a
 #    smali System.loadLibrary("opg3d") call), just replace the file:

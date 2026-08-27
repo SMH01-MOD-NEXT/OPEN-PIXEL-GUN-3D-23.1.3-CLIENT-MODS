@@ -49,3 +49,46 @@ android {
         }
     }
 }
+
+// Every build drops the library where it is actually used from:
+//
+//   <project root>/lib/arm64-v8a/libopg3d.so            stripped, goes in the APK
+//   <project root>/lib/arm64-v8a/libopg3d.unstripped.so  keep for symbolize_log.py
+//
+// That mirrors the APK layout, so repacking is a plain copy into lib/arm64-v8a
+// with no digging through build/intermediates. The directory is gitignored.
+def exportDir = rootProject.layout.projectDirectory.dir('lib/arm64-v8a')
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        def name = variant.name
+        def cap = name.capitalize()
+        def merged = layout.buildDirectory
+                .dir("intermediates/merged_native_libs/${name}/merge${cap}NativeLibs/out/lib/arm64-v8a")
+        def stripped = layout.buildDirectory
+                .dir("intermediates/stripped_native_libs/${name}/strip${cap}DebugSymbols/out/lib/arm64-v8a")
+
+        def export = tasks.register("export${cap}NativeLib", Copy) {
+            description = "Copies the ${name} libopg3d.so into <root>/lib/arm64-v8a"
+            group = 'build'
+            // The unstripped build has debug symbols; it is renamed so it can sit
+            // next to the shipping one instead of overwriting it.
+            from(merged) {
+                include '*.so'
+                rename '(.*)\\.so', '$1.unstripped.so'
+            }
+            from(stripped) {
+                include '*.so'
+            }
+            into exportDir
+            duplicatesStrategy = DuplicatesStrategy.INCLUDE
+            doLast {
+                logger.lifecycle("libopg3d.so -> ${exportDir.asFile.absolutePath}")
+            }
+        }
+
+        tasks.matching { it.name == "assemble${cap}" }.configureEach {
+            finalizedBy export
+        }
+    }
+}
