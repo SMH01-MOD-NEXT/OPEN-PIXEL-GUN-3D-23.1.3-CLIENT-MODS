@@ -107,8 +107,11 @@ target_include_directories(shadowhook_static
 target_link_libraries(shadowhook_static PUBLIC log dl)
 
 # --- Our library --------------------------------------------------------------
-# photon_hooks.cpp is the legacy 13.2.1 ARM32 implementation and is
-# intentionally excluded from this 23.1.3 ARM64 bootstrap.
+# This library is a thin client, not a backend. Accounts, sessions, bans,
+# progression, catalogs, remote configuration and client updates are served by
+# the separate OPEN-PIXEL-GUN-3D-BACKEND project; what remains here is the
+# exact-build startup compatibility patch, expansion-file provisioning, boot
+# diagnostics and the Photon transport.
 add_library(opg3d SHARED
     main.cpp
     elf_sym.cpp

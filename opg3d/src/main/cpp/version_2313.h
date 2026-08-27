@@ -13,8 +13,9 @@
 #include "log.h"
 
 // Exact-build startup compatibility and passive lifecycle diagnostics for the
-// supplied PG3D 23.1.3 ARM64 libil2cpp.so. Backend behavior is isolated in
-// backend_local_2313.h.
+// supplied PG3D 23.1.3 ARM64 libil2cpp.so. No backend behavior lives here or
+// anywhere else in this library: accounts, sessions, bans, configuration and
+// updates are served by the separate OPEN-PIXEL-GUN-3D-BACKEND project.
 namespace version_2313 {
 namespace detail {
 
