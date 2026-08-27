@@ -10,9 +10,11 @@ def photonAppId = providers.gradleProperty('PHOTON_APP_ID').orElse('').get()
 def photonMode = providers.gradleProperty('PHOTON_MODE').orElse('cloud').get()
 def photonAddr = providers.gradleProperty('PHOTON_SERVER_ADDRESS').orElse('').get()
 def photonPort = providers.gradleProperty('PHOTON_SERVER_PORT').orElse('5055').get()
-// GHA runners ship CMake 3.31.5 in the SDK; local machines rarely do, so the
-// version is overridable with -PCMAKE_VERSION=<installed> and CI keeps its own.
-def cmakeVersion = providers.gradleProperty('CMAKE_VERSION').orElse('3.31.5').get()
+// CMake 4.1.2 is the version this port is built and verified with. GHA runners
+// ship 3.31.5 in the SDK image, so the workflow installs 4.1.2 through
+// sdkmanager before building. Override with -PCMAKE_VERSION=<installed> if a
+// machine has a different one.
+def cmakeVersion = providers.gradleProperty('CMAKE_VERSION').orElse('4.1.2').get()
 
 android {
     namespace 'com.opg3d.redirect'
