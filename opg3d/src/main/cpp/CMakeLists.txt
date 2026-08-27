@@ -15,6 +15,12 @@ set(PHOTON_SERVER_ADDRESS "" CACHE STRING "Optional fixed/self-hosted address")
 set(PHOTON_SERVER_PORT "5055" CACHE STRING "Optional fixed/self-hosted port")
 set(SHADOWHOOK_TAG "v2.0.1" CACHE STRING "ShadowHook version (git tag bytedance/android-inline-hook)")
 
+# Thin-client configuration. OPG3D_APPID_KEY must equal the backend's
+# OPG3D_APPID_KEY: it is what opens the sealed Photon AppID envelope. It is a
+# credential and is never stored in the repository.
+set(OPG3D_APPID_KEY "" CACHE STRING "Shared key that unseals Photon AppIDs (CI secret / local -P)")
+set(OPG3D_DEFAULT_SERVER "" CACHE STRING "Optional fallback backend host[:port] when discovery finds none")
+
 # --- ShadowHook (bytedance): sources + our patches ----------------------------
 # ShadowHook is the ARM inline-hook engine. IL2CPP symbol resolution is done
 # by our own elf_sym/.dynsym resolver; shadowhook is used ONLY for the inline
@@ -172,6 +178,8 @@ target_compile_definitions(opg3d PRIVATE
     PHOTON_APP_ID="${PHOTON_APP_ID}"
     PHOTON_SERVER_ADDRESS="${PHOTON_SERVER_ADDRESS}"
     PHOTON_SERVER_PORT=${PHOTON_SERVER_PORT}
+    OPG3D_APPID_KEY="${OPG3D_APPID_KEY}"
+    OPG3D_DEFAULT_SERVER="${OPG3D_DEFAULT_SERVER}"
 )
 if(PHOTON_MODE STREQUAL "selfhosted")
     target_compile_definitions(opg3d PRIVATE PHOTON_MODE_SELFHOSTED=1)

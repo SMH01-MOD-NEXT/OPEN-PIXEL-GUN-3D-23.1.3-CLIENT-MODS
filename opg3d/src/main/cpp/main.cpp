@@ -7,6 +7,8 @@
 #include <unistd.h>
 
 #include "anomaly_trace_2313.h"
+#include "backend_client_2313.h"
+#include "backend_redirect_2313.h"
 #include "config.h"
 #include "elf_sym.h"
 #include "il2cpp.h"
@@ -55,9 +57,12 @@ constexpr bool anomaly_chain_trace = true;
 constexpr bool obb_provisioner = true;
 } // namespace startup
 
-// Realtime transport. Photon stays the battle transport; only the credential
-// source changes (it is served by the backend, not compiled in).
+// Traffic. The self-hosted backend answers every retired HTTP service, and
+// Photon stays the battle transport with its credential served by that backend
+// instead of being compiled in.
 namespace network {
+constexpr bool backend_client = true;
+constexpr bool backend_redirect = true;
 constexpr bool photon_online = true;
 constexpr bool photon_default_plugin = true;
 constexpr bool photon_trace = true;
@@ -184,6 +189,9 @@ void* init_thread(void*) {
         feature_config::startup::anomaly_chain_trace,
         []() { return anomaly_trace_2313::install_hooks(); });
 
+    const bool backend_redirect = install_component(
+        "network", "backend redirect", feature_config::network::backend_redirect,
+        []() { return backend_redirect_2313::install_hooks(); });
     const bool photon_online = install_component(
         "network", "Photon online", feature_config::network::photon_online,
         []() { return photon_2313::install_hooks(); });
@@ -196,8 +204,8 @@ void* init_thread(void*) {
         []() { return photon_trace_2313::install_hooks(); });
 
     if (signature_compat && version_traces && startup_guards &&
-        switcher_trace && stall_watchdog && anomaly_trace && photon_online &&
-        default_plugin && photon_trace) {
+        switcher_trace && stall_watchdog && anomaly_trace && backend_redirect &&
+        photon_online && default_plugin && photon_trace) {
         LOGI("init: all enabled 23.1.3 components installed; "
              "disabled components were intentionally skipped");
     } else {
@@ -221,6 +229,13 @@ void* init_thread(void*) {
 __attribute__((constructor)) static void on_load() {
     if (feature_config::startup::obb_provisioner) {
         obb_provisioner::provision();
+    }
+    // Started before the IL2CPP wait, not after it: finding the server and
+    // registering the device takes seconds, and doing it in parallel with the
+    // runtime coming up means the session and the Photon credential are usually
+    // ready before the game's first request.
+    if (feature_config::network::backend_client) {
+        (void)backend_client_2313::start();
     }
     pthread_t thread;
     if (pthread_create(&thread, nullptr, init_thread, nullptr) == 0) {

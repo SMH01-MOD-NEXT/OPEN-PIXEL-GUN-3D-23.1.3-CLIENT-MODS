@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "backend_client_2313.h"
 #include "config.h"
 #include "hook.h"
 #include "il2cpp.h"
@@ -201,15 +202,33 @@ bool ensure_online_mode() {
     return true;
 }
 
+// The AppID is a server-side credential: the backend serves it sealed for this
+// player and backend_client_2313 opens it. PHOTON_APP_ID remains only as a
+// bench fallback for builds made without a server.
+std::string app_id_for(const char* point) {
+    std::string served = backend_client_2313::photon_app_id("pun");
+    if (!served.empty()) return served;
+    const std::string compiled(PHOTON_APP_ID);
+    if (!compiled.empty()) {
+        LOGW("23.1.3-photon[%s]: the backend served no AppID; falling back to "
+             "the one compiled into this build", point);
+    }
+    return compiled;
+}
+
 bool force_cloud(const char* point) {
 #ifdef PHOTON_MODE_SELFHOSTED
     (void)point;
     return true;
 #else
-    const size_t app_length = std::strlen(PHOTON_APP_ID);
+    const std::string app = app_id_for(point);
+    const size_t app_length = app.size();
     if (app_length == 0u) {
         if (!g_empty_app_logged.exchange(true)) {
-            LOGE("23.1.3-photon[%s]: PHOTON_APP_ID is empty", point);
+            LOGE("23.1.3-photon[%s]: no Photon AppID is available. The backend "
+                 "has none configured, or OPG3D_APPID_KEY in this build does "
+                 "not match the server's; online play stays unavailable.",
+                 point);
         }
         return false;
     }
@@ -220,7 +239,7 @@ bool force_cloud(const char* point) {
         return false;
     }
     ManagedString* app_id = il2cpp::string_new != nullptr
-                                ? il2cpp::string_new(PHOTON_APP_ID)
+                                ? il2cpp::string_new(app.c_str())
                                 : nullptr;
     if (app_id == nullptr) {
         LOGE("23.1.3-photon[%s]: il2cpp_string_new failed", point);
@@ -263,7 +282,7 @@ bool force_cloud(const char* point) {
          " sdk=%d host=%d region=%d appChars=%zu appFNV=%08" PRIx32
          " ready=%d",
          point, apply, called_sdk ? 1 : 0, host, region, app_length,
-         fnv1a(PHOTON_APP_ID, app_length), ready ? 1 : 0);
+         fnv1a(app.c_str(), app_length), ready ? 1 : 0);
     if (!ready) {
         LOGE("23.1.3-photon[%s]: PhotonCloud/eu route verification failed",
              point);
@@ -274,18 +293,19 @@ bool force_cloud(const char* point) {
 
 ManagedString* hook_select_app_id(void* hidden_settings,
                                   const MethodInfo* method) {
-    const size_t length = std::strlen(PHOTON_APP_ID);
+    const std::string app = app_id_for("Switcher.SelectAppId");
+    const size_t length = app.size();
     if (length != 0u && il2cpp::string_new != nullptr) {
-        ManagedString* replacement = il2cpp::string_new(PHOTON_APP_ID);
+        ManagedString* replacement = il2cpp::string_new(app.c_str());
         if (replacement != nullptr) {
-            LOGI("23.1.3-photon: mapped Switcher AppID selector -> configured "
-                 "credential (chars=%zu fnv=%08" PRIx32 ")",
-                 length, fnv1a(PHOTON_APP_ID, length));
+            LOGI("23.1.3-photon: mapped Switcher AppID selector -> the "
+                 "credential served by the backend (chars=%zu fnv=%08" PRIx32 ")",
+                 length, fnv1a(app.c_str(), length));
             return replacement;
         }
     }
-    LOGW("23.1.3-photon: AppID selector passthrough (build secret missing "
-         "or string allocation failed)");
+    LOGW("23.1.3-photon: AppID selector passthrough (the backend served no "
+         "credential, or string allocation failed)");
     return g_select_app_id != nullptr
                ? g_select_app_id(hidden_settings, method)
                : nullptr;
@@ -387,9 +407,10 @@ inline bool install_hooks() {
          installed, app_id ? "OK" : "FAILED",
          connect ? "OK" : "FAILED",
          backend_guard ? "OK" : "FAILED");
-    if (std::strlen(PHOTON_APP_ID) == 0u) {
-        LOGW("23.1.3-photon: build has no PHOTON_APP_ID; online route is "
-             "diagnostic passthrough until a trusted build supplies it");
+    if (std::strlen(OPG3D_APPID_KEY) == 0u) {
+        LOGW("23.1.3-photon: this build carries no OPG3D_APPID_KEY, so a sealed "
+             "AppID from the backend cannot be opened; the online route stays a "
+             "diagnostic passthrough");
     }
     return app_id && connect && backend_guard;
 }
