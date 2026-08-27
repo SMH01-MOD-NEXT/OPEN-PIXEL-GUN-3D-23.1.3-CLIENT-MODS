@@ -22,7 +22,7 @@
 #include "startup_guards_2313.h"
 #include "startup_trace_2313.h"
 #include "version_2313.h"
-#include "ws_trace_2313.h"
+#include "ws_redirect_2313.h"
 
 namespace {
 
@@ -67,10 +67,11 @@ constexpr bool backend_redirect = true;
 constexpr bool photon_online = true;
 constexpr bool photon_default_plugin = true;
 constexpr bool photon_trace = true;
-// Reports the addresses of the two WebSockets this build opens (the game's own
-// socket.io config channel and Photon's battle transport). Read-only: it is
-// what tells the self-hosted server which channel it still has to answer.
-constexpr bool websocket_trace = true;
+// Points the game's socket.io config channel at the self-hosted backend. That
+// channel runs on BestHTTP, so the UnityWebRequest/WWW redirect never sees it,
+// and the live config the boot waits for arrives nowhere else. Photon's own
+// WebSocket address is reported but never rewritten.
+constexpr bool websocket_redirect = true;
 } // namespace network
 
 } // namespace feature_config
@@ -207,26 +208,26 @@ void* init_thread(void*) {
     const bool photon_trace = install_component(
         "network", "Photon trace", feature_config::network::photon_trace,
         []() { return photon_trace_2313::install_hooks(); });
-    const bool websocket_trace = install_component(
-        "network", "WebSocket address trace",
-        feature_config::network::websocket_trace,
-        []() { return ws_trace_2313::install_hooks(); });
+    const bool websocket_redirect = install_component(
+        "network", "config socket redirect",
+        feature_config::network::websocket_redirect,
+        []() { return ws_redirect_2313::install_hooks(); });
 
     if (signature_compat && version_traces && startup_guards &&
         switcher_trace && stall_watchdog && anomaly_trace && backend_redirect &&
-        photon_online && default_plugin && photon_trace && websocket_trace) {
+        photon_online && default_plugin && photon_trace && websocket_redirect) {
         LOGI("init: all enabled 23.1.3 components installed; "
              "disabled components were intentionally skipped");
     } else {
         LOGE("init: 23.1.3 thin client incomplete: signature=%d traces=%d "
              "startup-guards=%d switcher-trace=%d stall-watchdog=%d "
              "anomaly-trace=%d photon=%d plugin=%d photon-trace=%d "
-             "websocket-trace=%d",
+             "config-socket-redirect=%d",
              signature_compat ? 1 : 0, version_traces ? 1 : 0,
              startup_guards ? 1 : 0, switcher_trace ? 1 : 0,
              stall_watchdog ? 1 : 0, anomaly_trace ? 1 : 0,
              photon_online ? 1 : 0, default_plugin ? 1 : 0,
-             photon_trace ? 1 : 0, websocket_trace ? 1 : 0);
+             photon_trace ? 1 : 0, websocket_redirect ? 1 : 0);
     }
 
     if (il2cpp::thread_detach != nullptr) il2cpp::thread_detach(attached_thread);
