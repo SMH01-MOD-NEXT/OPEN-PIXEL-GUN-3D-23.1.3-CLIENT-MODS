@@ -73,6 +73,10 @@ constexpr const char* kBackendHosts[] = {
 constexpr uint64_t kLogBurst = 24u;
 constexpr uint64_t kLogPeriod = 64u;
 constexpr size_t kMaxUrlLength = 4096u;
+// How long a request for a retired host may wait for the handshake to pick a
+// server. Long enough to cover LAN discovery on the first launch, short enough
+// that a serverless run still loads.
+constexpr int kServerWaitMs = 2500;
 
 // Generated managed methods take their explicit arguments followed by
 // MethodInfo*. Instance methods take `this` first.
@@ -174,6 +178,12 @@ inline bool rewrite_url(const std::string& url, std::string* out) {
     }
     if (!known) return false;
 
+    // This URL belongs to a retired service, so it is worth a short wait for
+    // the handshake: the game's first analytics call happens before discovery
+    // can finish, and letting it leave for a dead host wastes a real request.
+    if (!backend_client_2313::has_server()) {
+        backend_client_2313::wait_for_server(kServerWaitMs);
+    }
     const std::string server = backend_client_2313::endpoint();
     if (server.empty()) {
         ++g_no_server;

@@ -35,6 +35,7 @@
 // it fell over. Bearer tokens are never printed in full.
 // -----------------------------------------------------------------------------
 
+#include <atomic>
 #include <cerrno>
 #include <cinttypes>
 #include <cstddef>
@@ -73,6 +74,14 @@ constexpr int kSocketTimeoutMs = 6000;
 constexpr size_t kMaxResponseBytes = 1u << 20;
 constexpr size_t kBodyPreview = 900u;
 constexpr int kDefaultPort = 8080;
+// The search does not give up after the first sweep: the server is often started
+// after the game, and the player may write the manual file while the loading
+// screen is up. Retrying costs one broadcast every few seconds and saves a
+// restart every time.
+constexpr int kRetryDelayMs = 5000;
+constexpr int kRetryRounds = 60;   // ~5 minutes of looking
+
+inline std::atomic<bool> g_search_hint_logged{false};
 
 inline pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 inline pthread_cond_t g_ready_signal = PTHREAD_COND_INITIALIZER;
@@ -183,19 +192,40 @@ inline void resolve_paths() {
     g_package = package_name();
     if (g_package.empty()) g_package = "com.pixel.gun3d";
 
+    // This runs from the ELF constructor, long before the game calls
+    // getFilesDir(), so <data>/files usually does not exist yet. Requiring it to
+    // exist sent the state to /data/local/tmp, which an app cannot write on a
+    // modern Android: create the tree instead, and accept a candidate only once
+    // a real write succeeds there.
     const char* candidates[] = {"/data/user/0/", "/data/data/"};
     for (const char* root : candidates) {
-        std::string base = std::string(root) + g_package + "/files";
+        const std::string base = std::string(root) + g_package;
         struct stat info{};
-        if (stat(base.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
-            g_dir = base + "/opg3d";
-            mkdir(g_dir.c_str(), 0700);
-            break;
+        if (stat(base.c_str(), &info) != 0 || !S_ISDIR(info.st_mode)) continue;
+        const std::string files = base + "/files";
+        mkdir(files.c_str(), 0771);
+        const std::string dir = files + "/opg3d";
+        mkdir(dir.c_str(), 0700);
+        const std::string probe = dir + "/.writable";
+        const int fd = open(probe.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            LOGW("23.1.3-client: %s is not writable (%s)", dir.c_str(),
+                 std::strerror(errno));
+            continue;
         }
+        close(fd);
+        unlink(probe.c_str());
+        g_dir = dir;
+        break;
     }
     if (g_dir.empty()) {
+        // Last resort. Only reachable on a rooted or otherwise unusual device;
+        // if it fails too, the client still runs, it just forgets its device id
+        // between launches.
         g_dir = "/data/local/tmp/opg3d";
         mkdir(g_dir.c_str(), 0700);
+        LOGW("23.1.3-client: no writable app directory; falling back to %s",
+             g_dir.c_str());
     }
 
     const char* external = getenv("EXTERNAL_STORAGE");
@@ -614,10 +644,16 @@ inline bool select_server() {
     }
 
     if (source == nullptr) {
-        LOGE("23.1.3-client: no backend found. Put \"host:port\" into %s and "
-             "restart the game, or run the server on this network so discovery "
-             "can see it.",
-             g_external_config.c_str());
+        // The hint is printed once. The search keeps running in the background,
+        // so the server can be started (or the file written) while the game sits
+        // on the loading screen - no restart needed.
+        if (!g_search_hint_logged.exchange(true)) {
+            LOGE("23.1.3-client: no backend found. Put \"host:port\" into %s, or "
+                 "run the server on this network so discovery can see it. The "
+                 "search repeats every %d s until one answers; restarting the "
+                 "game is not required.",
+                 g_external_config.c_str(), kRetryDelayMs / 1000);
+        }
         return false;
     }
 
@@ -871,7 +907,33 @@ inline void handshake() {
 inline void* bootstrap(void*) {
     resolve_paths();
     load_device_id();
-    if (select_server()) handshake();
+    for (int round = 1; round <= kRetryRounds; ++round) {
+        if (select_server()) {
+            handshake();
+            bool ok = false;
+            {
+                Guard guard;
+                ok = !g_session.empty();
+            }
+            if (ok) break;
+            // The address answered discovery but not the API, or registration
+            // failed. Forget it and look again rather than sitting on a server
+            // that cannot serve.
+            {
+                Guard guard;
+                g_host.clear();
+                g_source = "none";
+            }
+        }
+        pthread_cond_broadcast(&g_ready_signal);
+        if (round == kRetryRounds) {
+            LOGE("23.1.3-client: gave up looking for a backend after %d "
+                 "attempts; restart the game once the server is reachable",
+                 kRetryRounds);
+            break;
+        }
+        usleep(static_cast<useconds_t>(kRetryDelayMs) * 1000u);
+    }
     pthread_cond_broadcast(&g_ready_signal);
     return nullptr;
 }
@@ -908,6 +970,23 @@ inline std::string endpoint() {
 inline bool has_server() {
     detail::Guard guard;
     return !detail::g_host.empty();
+}
+
+// The game fires its first analytics request about two seconds after launch,
+// which can be sooner than discovery finishes. The redirect hook waits here for
+// a short while so those early requests still reach the server instead of the
+// retired host. Bounded on purpose: if no server exists, the game must keep
+// loading rather than freeze on a hook.
+inline bool wait_for_server(int timeout_ms) {
+    if (has_server()) return true;
+    const uint64_t deadline =
+        opg3d_log::monotonic_ms() +
+        static_cast<uint64_t>(timeout_ms > 0 ? timeout_ms : 0);
+    while (opg3d_log::monotonic_ms() < deadline) {
+        usleep(50u * 1000u);
+        if (has_server()) return true;
+    }
+    return false;
 }
 
 inline bool signed_in() {
