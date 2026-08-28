@@ -13,13 +13,18 @@
 //     attachment 0:  16 bytes  <- the event NAME, sealed
 //     attachment 1: 608 bytes  <- the payload,    sealed
 //
-// Both lengths are exact multiples of the AES block size, and attachment 0 came
-// out completely different in two sessions whose first emit was the same event,
-// so the codec is keyed or IV'd per connection. Every offline attempt to recover
-// a static key failed: the metadata literal table (43998 entries) carries no
-// standalone key - every hex or base64 blob of key length is a BouncyCastle
-// curve parameter - and the four app-owned GUID-shaped constants were all
-// rejected by the decrypt oracle.
+// Both lengths are exact multiples of the AES block size, and the backend has
+// since measured exactly what varies. Attachment 0 is byte-identical across
+// four connections that shared one pinned socket.io sid - spanning three server
+// restarts - and different for every distinct sid. Attachment 1 repeats its
+// first seven blocks under a repeated sid and only then diverges, where the
+// payload's own per-connection counter starts. So the key material is a
+// deterministic function of the sid, with no per-connection randomness of its
+// own, and the plaintext is what moves the tail. Every offline attempt to
+// recover a static key failed: the metadata literal table (43998 entries)
+// carries no standalone key - every hex or base64 blob of key length is a
+// BouncyCastle curve parameter - and the four app-owned GUID-shaped constants
+// were all rejected by the decrypt oracle.
 //
 // So the key material is assembled at runtime. This component only observes the
 // boundary where it is used. It changes no behaviour: every hook calls straight
@@ -79,10 +84,44 @@
 // SocketManager.get_Extras() lazily builds and caches in its _extras field
 // (offset 0xA0). Disassembling that getter at RVA 0x3ECF1F4 shows it XOR two
 // static 32-byte arrays into a password buffer and hand it to the cipher's
-// constructor at RVA 0x3B680F4 - with no session token, sid, handshake value or
-// RNG anywhere on the path. Hooking that constructor and its encrypt/decrypt
-// pair is therefore both necessary and sufficient, and it is what the cipher
-// hooks below do.
+// constructor at RVA 0x3B680F4. That read said no session value reaches the
+// password, and the wire says the sid reaches the key material anyway, so the
+// sid must enter somewhere that disassembly did not cover: as the PBKDF2 salt
+// the constructor picks up itself, or through one of those two arrays being
+// filled in at runtime rather than being the constant it looks like. Either way
+// the salt was never in the static candidate set the offline search swept,
+// which is why that search could not have succeeded. Hooking the constructor
+// and its encrypt/decrypt pair settles it, because the constructor logs the
+// password, the derived key and the derived IV side by side.
+//
+// What the second armed run proved (2026-08-28): the class is shared
+// -----------------------------------------------------------------
+// All seven hooks installed and the cipher hooks worked exactly as designed -
+// they printed passwords, derived keys, derived IVs and both sides of every
+// transform. What they did not print was anything belonging to socket.io. This
+// cipher type is not the socket codec's private property: the app also uses it
+// for PlayerPrefs key obfuscation and for its on-disk config cache. One boot
+// spent the entire 600-line budget in 2.15 seconds on 279 encrypts of
+// PlayerPrefs keys (caller RVA 0x3B6C4D4), 312 decrypts of cached config JSON
+// (caller RVA 0x24A4318) and three constructors belonging to neither socket -
+// and the backend did not log the websocket open until 2.6 seconds after the
+// budget was already spent. [emit] printed nothing for the same reason.
+//
+// Two of those three constructors are worth keeping in mind while reading a
+// capture, because they prove the type is reused rather than reconfigured: both
+// take a 40-byte password, and the two differ only in their first 20 bytes
+// while sharing an identical 20-byte tail. The socket codec's own password is
+// 32 bytes, matching the XOR of the two arrays above.
+//
+// Raising the budget is the wrong fix: at that rate the interesting lines
+// arrive thousands of lines deep and logd starts dropping messages first. The
+// codec has to be identified instead, which the accessor does for free - see
+// the get_Extras section below. Its return value is the socket.io instance, so
+// encrypt and decrypt log only when `this` matches, and the pointer starts out
+// null so every pre-handshake caller is filtered out without needing to be
+// recognised. The constructor deliberately stays ungated: it fires a handful of
+// times per boot, it is the one place the password is visible, and it still
+// records the socket codec's password even if the accessor hook fails.
 //
 // Reading managed containers
 // --------------------------
@@ -187,6 +226,29 @@ constexpr const char* kAlgField =
 constexpr const char* kKeyValue = "KeyValue";
 constexpr const char* kIVValue = "IVValue";
 
+// -- identifying the socket.io instance -------------------------------------
+//
+// The cipher type above is shared: PlayerPrefs key obfuscation and the on-disk
+// config cache both build their own instances of it, and between them they
+// produce hundreds of transforms per boot. Filtering by content cannot separate
+// those from the handshake, but identity can, and SocketManager hands the right
+// pointer over for free.
+//
+// dump2313.cs 422832: namespace BestHTTP.SocketIO, TypeDefIndex 10433.
+//
+//   private <kCodecClass> _extras;                     // 0xA0
+//   internal <kCodecClass> get_Extras()                RVA 0x3ECF1F4
+//
+// That class declares exactly one get_Extras, so {namespace, class, name, 0} is
+// unambiguous; the two other get_Extras in the dump return
+// IDictionary<string, object> from unrelated types and this lookup cannot reach
+// them. Both the emit path and the inbound path go through this accessor to
+// reach the codec, so its return value identifies the socket.io instance for
+// both directions.
+constexpr const char* kSocketNs = "BestHTTP.SocketIO";
+constexpr const char* kSocketClass = "SocketManager";
+constexpr const char* kGetExtras = "get_Extras";
+
 // Generated managed methods take their explicit arguments followed by
 // MethodInfo*. Instance methods take `this` first.
 using EmitFn = bool (*)(void* self, void* name, void* args, void* blob,
@@ -202,6 +264,9 @@ using CipherOpenFn = void* (*)(void* self, void* input, void* method);
 // (byte[], bool) : byte[]; the trailing bool rides in w2, ahead of MethodInfo*.
 using CipherSealFn = void* (*)(void* self, void* input, bool flag,
                                void* method);
+// get_Extras() : <kCodecClass>; no explicit arguments, so `this` is followed
+// straight by MethodInfo*.
+using GetExtrasFn = void* (*)(void* self, void* method);
 
 inline EmitFn g_orig_emit = nullptr;
 inline CodecFn g_orig_codec_shared = nullptr;
@@ -210,6 +275,14 @@ inline InboundFn g_orig_inbound = nullptr;
 inline CipherCtorFn g_orig_cipher_ctor = nullptr;
 inline CipherOpenFn g_orig_cipher_open = nullptr;
 inline CipherSealFn g_orig_cipher_seal = nullptr;
+inline GetExtrasFn g_orig_get_extras = nullptr;
+
+// The socket.io codec, published by get_extras_hook the first time the managed
+// side asks for it. It stays null until then, which is exactly the filter the
+// encrypt and decrypt hooks need: every caller that runs before the handshake
+// belongs to some other subsystem and is rejected without having to be
+// recognised.
+inline void* g_socket_codec = nullptr;
 
 inline bool g_installed = false;
 
@@ -224,9 +297,15 @@ constexpr int32_t kMaxAttachments = 8;
 // this cap; the sealed side stays on the hex budget above.
 constexpr size_t kTextBytesLogged = 768u;
 
-// A sealed handshake is a handful of lines. The budget only stops a chatty
-// config channel from burying the rest of logcat.
-constexpr uint64_t kMaxLines = 600u;
+// Once encrypt and decrypt are filtered to the socket.io codec, a sealed
+// handshake is a handful of lines, so this is headroom rather than a real
+// limit. Raising it is not an alternative to that filter: the first attempt ran
+// unfiltered and spent 600 lines in 2.15 seconds on other subsystems, 2.6
+// seconds before the websocket even opened, and at that rate logd starts
+// dropping messages long before anything interesting arrives. The margin is
+// here so that the ungated constructor lines still land if the accessor hook
+// ever fails to install.
+constexpr uint64_t kMaxLines = 2000u;
 inline uint64_t g_lines = 0u;
 inline bool g_quiet = false;
 
@@ -445,6 +524,42 @@ inline void inbound_hook(void* self, void* socket, void* packet, void* args,
 // The cipher type is a plain Rilisoft type, not a Rilisoft.WebSocket one.
 constexpr const char* kCipherNs = "Rilisoft";
 
+// True only for the instance SocketManager handed out. Every other user of this
+// cipher - PlayerPrefs key obfuscation, the on-disk config cache - is rejected
+// by identity rather than by content, so nothing they do can bury the
+// handshake.
+inline bool is_socket_codec(void* self) {
+    return self != nullptr && self == g_socket_codec;
+}
+
+// Publishes the socket.io codec the first time the managed side asks for it.
+// The accessor builds it lazily, so on that first call the constructor below
+// has already logged this instance's password by the time the pointer arrives
+// here - which is why the constructor stays ungated.
+//
+// Reading the derived key and IV off the returned object is the same fail-closed
+// pair the constructor uses: if Mono's protected state is reachable by name they
+// land here in full, and the PBKDF2 salt stops mattering at all.
+inline void* get_extras_hook(void* self, void* method) {
+    void* codec = g_orig_get_extras != nullptr
+                      ? g_orig_get_extras(self, method)
+                      : nullptr;
+
+    if (codec != nullptr && codec != g_socket_codec) {
+        g_socket_codec = codec;
+        if (budget()) {
+            void* algorithm = read_field_ptr(codec, kAlgField);
+            void* key = read_field_ptr(algorithm, kKeyValue);
+            void* iv = read_field_ptr(algorithm, kIVValue);
+            LOGI("23.1.3-sio[cipher] socket codec identified self=%p key=%s "
+                 "iv=%s; encrypt and decrypt now log this instance only",
+                 codec, byte_array_hex(key).c_str(),
+                 byte_array_hex(iv).c_str());
+        }
+    }
+    return codec;
+}
+
 // The constructor argument is the 32-byte password that every offline search
 // failed to recover, so this one line is the point of the whole component: with
 // it the backend can rebuild the cipher and open both attachments itself.
@@ -480,7 +595,9 @@ inline void cipher_ctor_hook(void* self, void* password, void* method) {
 // Inbound direction: sealed bytes in, open bytes out. This is what the client
 // expects the server's reply to look like once it is unwrapped.
 inline void* cipher_open_hook(void* self, void* input, void* method) {
-    if (budget()) {
+    const bool ours = is_socket_codec(self);
+
+    if (ours && budget()) {
         LOGI("23.1.3-sio[cipher] decrypt sealed bytes=%" PRId64 " hex=%s",
              array_length(input), byte_array_hex(input).c_str());
     }
@@ -489,7 +606,7 @@ inline void* cipher_open_hook(void* self, void* input, void* method) {
                        ? g_orig_cipher_open(self, input, method)
                        : nullptr;
 
-    if (budget()) {
+    if (ours && budget()) {
         LOGI("23.1.3-sio[cipher] decrypt open bytes=%" PRId64 " text='%s'",
              array_length(output), byte_array_text(output).c_str());
     }
@@ -501,7 +618,9 @@ inline void* cipher_open_hook(void* self, void* input, void* method) {
 // its exact plaintext.
 inline void* cipher_seal_hook(void* self, void* input, bool flag,
                               void* method) {
-    if (budget()) {
+    const bool ours = is_socket_codec(self);
+
+    if (ours && budget()) {
         LOGI("23.1.3-sio[cipher] encrypt open bytes=%" PRId64
              " flag=%d text='%s'",
              array_length(input), flag ? 1 : 0,
@@ -512,7 +631,7 @@ inline void* cipher_seal_hook(void* self, void* input, bool flag,
                        ? g_orig_cipher_seal(self, input, flag, method)
                        : nullptr;
 
-    if (budget()) {
+    if (ours && budget()) {
         LOGI("23.1.3-sio[cipher] encrypt sealed bytes=%" PRId64 " hex=%s",
              array_length(output), byte_array_hex(output).c_str());
     }
@@ -554,14 +673,30 @@ inline bool install() {
                       reinterpret_cast<void*>(&cipher_seal_hook),
                       reinterpret_cast<void**>(&g_orig_cipher_seal));
 
+    // The accessor that tells the encrypt and decrypt hooks which instance is
+    // the socket's. Without it they stay silent, because the cipher type is
+    // shared with PlayerPrefs and the config cache.
+    const bool get_extras =
+        hook::install({kSocketNs, kSocketClass, kGetExtras, 0},
+                      reinterpret_cast<void*>(&get_extras_hook),
+                      reinterpret_cast<void**>(&g_orig_get_extras));
+
     g_installed = emit || shared || unique || inbound || cipher_ctor ||
-                  cipher_open || cipher_seal;
+                  cipher_open || cipher_seal || get_extras;
 
     LOGI("23.1.3-sio: codec trace armed (emit=%d codec-shared=%d codec-sio=%d "
-         "inbound=%d cipher-ctor=%d cipher-open=%d cipher-seal=%d); logging "
-         "only, no packet is altered",
+         "inbound=%d cipher-ctor=%d cipher-open=%d cipher-seal=%d "
+         "get-extras=%d); logging only, no packet is altered",
          emit ? 1 : 0, shared ? 1 : 0, unique ? 1 : 0, inbound ? 1 : 0,
-         cipher_ctor ? 1 : 0, cipher_open ? 1 : 0, cipher_seal ? 1 : 0);
+         cipher_ctor ? 1 : 0, cipher_open ? 1 : 0, cipher_seal ? 1 : 0,
+         get_extras ? 1 : 0);
+
+    if (!get_extras) {
+        LOGE("23.1.3-sio: SocketManager.get_Extras could not be hooked, so the "
+             "socket codec cannot be told apart from the PlayerPrefs and "
+             "config-cache instances; encrypt and decrypt stay silent and only "
+             "the constructor lines arrive");
+    }
 
     if (!cipher_ctor && !cipher_seal) {
         LOGE("23.1.3-sio: neither the cipher constructor nor its encrypt method "
