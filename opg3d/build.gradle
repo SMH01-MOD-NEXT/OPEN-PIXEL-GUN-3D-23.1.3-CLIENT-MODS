@@ -23,8 +23,8 @@ def cmakeVersion = providers.gradleProperty('CMAKE_VERSION').orElse('4.1.2').get
 
 android {
     namespace 'com.opg3d.redirect'
-    compileSdk 35
-    ndkVersion '27.3.13750724'   // default NDK on GHA runners
+    compileSdk 36
+    ndkVersion '29.0.14206865'   // NDK r29 — newest installed
 
     defaultConfig {
         minSdk 21
