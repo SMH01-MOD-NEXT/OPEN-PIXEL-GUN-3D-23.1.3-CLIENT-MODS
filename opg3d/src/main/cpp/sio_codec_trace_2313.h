@@ -58,6 +58,32 @@
 // 0x77E7635000 plus 0x35C1C50 is the 0x77EABF6C50 that the address setter hook
 // reported in logcat.
 //
+// What the first fully armed run proved (2026-08-28)
+// --------------------------------------------------
+// All four WebSocketManager hooks installed at exactly their intended
+// addresses - libil2cpp.so base 0x77F0541000 plus 0x35C31E8 / 0x35C4028 /
+// 0x35C4170 / 0x35C396C matched the four logcat lines one for one - and the
+// client then completed a full sealed handshake. Yet across the entire session
+// only [emit] printed:
+//
+//   23.1.3-sio[emit] event='auth_v2' args=0x788d9102a0 blob_bytes=-1
+//   23.1.3-sio[emit] event='auth_v2' accepted=1
+//
+// codec-shared, codec-sio and inbound printed nothing at all. That silence is
+// evidence, not a missed hook: the trace numbers its lines, logcat carried
+// #000001 through #000262 with no gap, and the 600-line budget had spent 2. So
+// the codec pair hypothesis recorded above is wrong. Those two methods are not
+// on the emit path; they are reached only by whatever else that class serves.
+//
+// The sealing sits one level down instead, on the standalone cipher type that
+// SocketManager.get_Extras() lazily builds and caches in its _extras field
+// (offset 0xA0). Disassembling that getter at RVA 0x3ECF1F4 shows it XOR two
+// static 32-byte arrays into a password buffer and hand it to the cipher's
+// constructor at RVA 0x3B680F4 - with no session token, sid, handshake value or
+// RNG anywhere on the path. Hooking that constructor and its encrypt/decrypt
+// pair is therefore both necessary and sufficient, and it is what the cipher
+// hooks below do.
+//
 // Reading managed containers
 // --------------------------
 // Il2CppDumper cannot resolve field offsets for open generic types: List<T> and
@@ -111,6 +137,56 @@ constexpr const char* kInbound =
     "\xE4\xB8\x82\xE4\xB8\x81\xE4\xB8\x8E\xE4\xB8\x9B\xE4\xB8\x95"
     "\xE4\xB8\x91\xE4\xB8\x85\xE4\xB8\x81\xE4\xB8\x9A";
 
+// -- the real cipher boundary ----------------------------------------------
+//
+// The four WebSocketManager hooks above are not it. See the note at the top of
+// this file: in the first fully armed run only [emit] produced output, while
+// codec-shared, codec-sio and inbound stayed silent for the whole session even
+// though all four installed and the line budget was untouched. The sealing
+// therefore happens below that class, in the standalone codec type that
+// SocketManager.get_Extras() builds once and caches.
+//
+// dump2313.cs, TypeDefIndex 8304:
+//
+//   // Namespace: Rilisoft
+//   public sealed class <kCodecClass>
+//   {
+//       private readonly SymmetricAlgorithm ...;              // 0x10
+//       public void .ctor(byte[] password)                    RVA 0x3B680F4
+//       public byte[] <kCodecDecrypt>(byte[])                 RVA 0x3B6835C
+//       public byte[] <kCodecEncrypt>(byte[], bool = False)   RVA 0x3B6883C
+//   }
+//
+// The constructor argument is the 32-byte password that every offline search
+// failed to recover, and the encrypt argument is the open event name / open
+// payload whose sealed forms are already on the wire. Logging both ends of that
+// pair is what turns the sealed handshake into a known-plaintext transcript.
+//
+// Name safety: the sibling type at TypeDefIndex 8307 declares same-named
+// members, but they are ArraySegment<byte> overloads on a different class, so
+// metadata lookup by {namespace, class, name, argc} cannot reach them. Inside
+// 8304 all three targets are unique by argument count.
+constexpr const char* kCodecClass =
+    "\xE4\xB8\x8F\xE4\xB8\x9C\xE4\xB8\x91\xE4\xB8\x84\xE4\xB8\x9C"
+    "\xE4\xB8\x88\xE4\xB8\x9F\xE4\xB8\x94\xE4\xB8\x9C";
+constexpr const char* kCodecCtor = ".ctor";
+// decrypt: (byte[]) : byte[]                                       RVA 0x3B6835C
+constexpr const char* kCodecDecrypt =
+    "\xE4\xB8\x82\xE4\xB8\x9C\xE4\xB8\x94\xE4\xB8\x85\xE4\xB8\x8F"
+    "\xE4\xB8\x91\xE4\xB8\x89\xE4\xB8\x93\xE4\xB8\x9B";
+// encrypt: (byte[], bool = False) : byte[]                         RVA 0x3B6883C
+constexpr const char* kCodecEncrypt =
+    "\xE4\xB8\x9A\xE4\xB8\x8D\xE4\xB8\x90\xE4\xB8\x85\xE4\xB8\x92"
+    "\xE4\xB8\x9D\xE4\xB8\x99\xE4\xB8\x93\xE4\xB8\x87";
+
+// Mono spells SymmetricAlgorithm's protected state with these names. Both reads
+// fail closed, so a layout that hides them only costs the two extra log fields.
+constexpr const char* kAlgField =
+    "\xE4\xB8\x8D\xE4\xB8\x8D\xE4\xB8\x94\xE4\xB8\x81\xE4\xB8\x84"
+    "\xE4\xB8\x91\xE4\xB8\x95\xE4\xB8\x84\xE4\xB8\x8D";
+constexpr const char* kKeyValue = "KeyValue";
+constexpr const char* kIVValue = "IVValue";
+
 // Generated managed methods take their explicit arguments followed by
 // MethodInfo*. Instance methods take `this` first.
 using EmitFn = bool (*)(void* self, void* name, void* args, void* blob,
@@ -119,11 +195,21 @@ using CodecFn = void (*)(void* self, void* headers, void* payload,
                          void* attachments, void* method);
 using InboundFn = void (*)(void* self, void* socket, void* packet, void* args,
                            void* method);
+// .ctor(byte[] password); the password is the whole missing secret.
+using CipherCtorFn = void (*)(void* self, void* password, void* method);
+// (byte[]) : byte[]
+using CipherOpenFn = void* (*)(void* self, void* input, void* method);
+// (byte[], bool) : byte[]; the trailing bool rides in w2, ahead of MethodInfo*.
+using CipherSealFn = void* (*)(void* self, void* input, bool flag,
+                               void* method);
 
 inline EmitFn g_orig_emit = nullptr;
 inline CodecFn g_orig_codec_shared = nullptr;
 inline CodecFn g_orig_codec_unique = nullptr;
 inline InboundFn g_orig_inbound = nullptr;
+inline CipherCtorFn g_orig_cipher_ctor = nullptr;
+inline CipherOpenFn g_orig_cipher_open = nullptr;
+inline CipherSealFn g_orig_cipher_seal = nullptr;
 
 inline bool g_installed = false;
 
@@ -134,6 +220,9 @@ constexpr size_t kArrayData = 0x20u;
 constexpr int64_t kMaxArrayBytes = 1024 * 1024;
 constexpr size_t kHexBytesLogged = 320u;
 constexpr int32_t kMaxAttachments = 8;
+// The open payload is a 608-byte sealed blob, so its plaintext fits well inside
+// this cap; the sealed side stays on the hex budget above.
+constexpr size_t kTextBytesLogged = 768u;
 
 // A sealed handshake is a handful of lines. The budget only stops a chatty
 // config channel from burying the rest of logcat.
@@ -217,6 +306,32 @@ inline std::string byte_array_hex(void* array) {
     if (length == 0) return "<empty>";
     const uint8_t* data = static_cast<const uint8_t*>(array) + kArrayData;
     return bytes_to_hex(data, static_cast<size_t>(length), kHexBytesLogged);
+}
+
+// The open side of the cipher is a UTF-8 event name or a UTF-8 JSON payload, so
+// a readable rendering saves hand-decoding hex. Non-printable bytes collapse to
+// '.' rather than being dropped, which keeps every offset lined up with the hex.
+inline std::string bytes_to_text(const uint8_t* data, size_t length,
+                                 size_t cap) {
+    if (data == nullptr) return "<null>";
+    const size_t limit = length < cap ? length : cap;
+    std::string out;
+    out.reserve(limit + 8u);
+    for (size_t i = 0u; i < limit; ++i) {
+        const uint8_t byte = data[i];
+        out.push_back(byte >= 0x20u && byte < 0x7Fu ? static_cast<char>(byte)
+                                                   : '.');
+    }
+    if (length > limit) out += "...";
+    return out;
+}
+
+inline std::string byte_array_text(void* array) {
+    const int64_t length = array_length(array);
+    if (length < 0) return "<not-an-array>";
+    if (length == 0) return "<empty>";
+    const uint8_t* data = static_cast<const uint8_t*>(array) + kArrayData;
+    return bytes_to_text(data, static_cast<size_t>(length), kTextBytesLogged);
 }
 
 inline int32_t dictionary_count(void* dictionary) {
@@ -325,6 +440,85 @@ inline void inbound_hook(void* self, void* socket, void* packet, void* args,
     }
 }
 
+// -- the cipher itself ------------------------------------------------------
+
+// The cipher type is a plain Rilisoft type, not a Rilisoft.WebSocket one.
+constexpr const char* kCipherNs = "Rilisoft";
+
+// The constructor argument is the 32-byte password that every offline search
+// failed to recover, so this one line is the point of the whole component: with
+// it the backend can rebuild the cipher and open both attachments itself.
+inline void cipher_ctor_hook(void* self, void* password, void* method) {
+    if (budget()) {
+        LOGI("23.1.3-sio[cipher] .ctor password bytes=%" PRId64 " hex=%s",
+             array_length(password), byte_array_hex(password).c_str());
+    }
+
+    if (g_orig_cipher_ctor != nullptr) {
+        g_orig_cipher_ctor(self, password, method);
+    }
+
+    // Best effort, after the original has built the algorithm: if Mono's
+    // protected state is reachable by name, the derived key and IV can be
+    // lifted directly and the PBKDF2 salt stops mattering at all. Both reads
+    // fail closed, so an unexpected layout only costs these two lines.
+    void* algorithm = read_field_ptr(self, kAlgField);
+    if (algorithm == nullptr) return;
+
+    if (budget()) {
+        void* key = read_field_ptr(algorithm, kKeyValue);
+        LOGI("23.1.3-sio[cipher] .ctor derived key bytes=%" PRId64 " hex=%s",
+             array_length(key), byte_array_hex(key).c_str());
+    }
+    if (budget()) {
+        void* iv = read_field_ptr(algorithm, kIVValue);
+        LOGI("23.1.3-sio[cipher] .ctor derived iv bytes=%" PRId64 " hex=%s",
+             array_length(iv), byte_array_hex(iv).c_str());
+    }
+}
+
+// Inbound direction: sealed bytes in, open bytes out. This is what the client
+// expects the server's reply to look like once it is unwrapped.
+inline void* cipher_open_hook(void* self, void* input, void* method) {
+    if (budget()) {
+        LOGI("23.1.3-sio[cipher] decrypt sealed bytes=%" PRId64 " hex=%s",
+             array_length(input), byte_array_hex(input).c_str());
+    }
+
+    void* output = g_orig_cipher_open != nullptr
+                       ? g_orig_cipher_open(self, input, method)
+                       : nullptr;
+
+    if (budget()) {
+        LOGI("23.1.3-sio[cipher] decrypt open bytes=%" PRId64 " text='%s'",
+             array_length(output), byte_array_text(output).c_str());
+    }
+    return output;
+}
+
+// Outbound direction. The open side is the event name on the first call and the
+// encoded argument payload on the second, which pairs each wire attachment with
+// its exact plaintext.
+inline void* cipher_seal_hook(void* self, void* input, bool flag,
+                              void* method) {
+    if (budget()) {
+        LOGI("23.1.3-sio[cipher] encrypt open bytes=%" PRId64
+             " flag=%d text='%s'",
+             array_length(input), flag ? 1 : 0,
+             byte_array_text(input).c_str());
+    }
+
+    void* output = g_orig_cipher_seal != nullptr
+                       ? g_orig_cipher_seal(self, input, flag, method)
+                       : nullptr;
+
+    if (budget()) {
+        LOGI("23.1.3-sio[cipher] encrypt sealed bytes=%" PRId64 " hex=%s",
+             array_length(output), byte_array_hex(output).c_str());
+    }
+    return output;
+}
+
 inline bool install() {
     if (g_installed) return true;
 
@@ -345,15 +539,39 @@ inline bool install() {
                       reinterpret_cast<void*>(&inbound_hook),
                       reinterpret_cast<void**>(&g_orig_inbound));
 
-    g_installed = emit || shared || unique || inbound;
+    // The decisive three. Argument counts separate them from each other and
+    // from the same-named ArraySegment overloads on the sibling type.
+    const bool cipher_ctor =
+        hook::install({kCipherNs, kCodecClass, kCodecCtor, 1},
+                      reinterpret_cast<void*>(&cipher_ctor_hook),
+                      reinterpret_cast<void**>(&g_orig_cipher_ctor));
+    const bool cipher_open =
+        hook::install({kCipherNs, kCodecClass, kCodecDecrypt, 1},
+                      reinterpret_cast<void*>(&cipher_open_hook),
+                      reinterpret_cast<void**>(&g_orig_cipher_open));
+    const bool cipher_seal =
+        hook::install({kCipherNs, kCodecClass, kCodecEncrypt, 2},
+                      reinterpret_cast<void*>(&cipher_seal_hook),
+                      reinterpret_cast<void**>(&g_orig_cipher_seal));
+
+    g_installed = emit || shared || unique || inbound || cipher_ctor ||
+                  cipher_open || cipher_seal;
 
     LOGI("23.1.3-sio: codec trace armed (emit=%d codec-shared=%d codec-sio=%d "
-         "inbound=%d); logging only, no packet is altered",
-         emit ? 1 : 0, shared ? 1 : 0, unique ? 1 : 0, inbound ? 1 : 0);
+         "inbound=%d cipher-ctor=%d cipher-open=%d cipher-seal=%d); logging "
+         "only, no packet is altered",
+         emit ? 1 : 0, shared ? 1 : 0, unique ? 1 : 0, inbound ? 1 : 0,
+         cipher_ctor ? 1 : 0, cipher_open ? 1 : 0, cipher_seal ? 1 : 0);
 
-    if (!emit && !shared && !unique) {
-        LOGE("23.1.3-sio: neither the emit wrapper nor the codec pair could be "
-             "hooked, so the sealed event name stays unreadable");
+    if (!cipher_ctor && !cipher_seal) {
+        LOGE("23.1.3-sio: neither the cipher constructor nor its encrypt method "
+             "could be hooked, so this run recovers no password and no open "
+             "payload");
+    }
+
+    if (!emit && !cipher_ctor && !cipher_seal) {
+        LOGE("23.1.3-sio: no usable hook on either the emit or the cipher path, "
+             "so the sealed event name stays unreadable");
         return false;
     }
     return true;
