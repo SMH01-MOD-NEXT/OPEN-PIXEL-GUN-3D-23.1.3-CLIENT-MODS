@@ -19,6 +19,7 @@
 #include "photon_2313.h"
 #include "photon_default_plugin_2313.h"
 #include "photon_trace_2313.h"
+#include "sio_codec_trace_2313.h"
 #include "startup_guards_2313.h"
 #include "startup_trace_2313.h"
 #include "version_2313.h"
@@ -72,6 +73,11 @@ constexpr bool photon_trace = true;
 // and the live config the boot waits for arrives nowhere else. Photon's own
 // WebSocket address is reported but never rewritten.
 constexpr bool websocket_redirect = true;
+// Observes the auth namespace payload codec: the open event name going in
+// and the sealed byte[] attachments coming out. Logging only, no packet is
+// altered. This is the only route left to the key: the metadata literal
+// table holds no standalone one.
+constexpr bool sio_codec_trace = true;
 } // namespace network
 
 } // namespace feature_config
@@ -212,22 +218,28 @@ void* init_thread(void*) {
         "network", "config socket redirect",
         feature_config::network::websocket_redirect,
         []() { return ws_redirect_2313::install_hooks(); });
+    const bool sio_codec_trace = install_component(
+        "network", "socket.io codec trace",
+        feature_config::network::sio_codec_trace,
+        []() { return sio_codec_trace_2313::install_hooks(); });
 
     if (signature_compat && version_traces && startup_guards &&
         switcher_trace && stall_watchdog && anomaly_trace && backend_redirect &&
-        photon_online && default_plugin && photon_trace && websocket_redirect) {
+        photon_online && default_plugin && photon_trace &&
+        websocket_redirect && sio_codec_trace) {
         LOGI("init: all enabled 23.1.3 components installed; "
              "disabled components were intentionally skipped");
     } else {
         LOGE("init: 23.1.3 thin client incomplete: signature=%d traces=%d "
              "startup-guards=%d switcher-trace=%d stall-watchdog=%d "
              "anomaly-trace=%d photon=%d plugin=%d photon-trace=%d "
-             "config-socket-redirect=%d",
+             "config-socket-redirect=%d sio-codec-trace=%d",
              signature_compat ? 1 : 0, version_traces ? 1 : 0,
              startup_guards ? 1 : 0, switcher_trace ? 1 : 0,
              stall_watchdog ? 1 : 0, anomaly_trace ? 1 : 0,
              photon_online ? 1 : 0, default_plugin ? 1 : 0,
-             photon_trace ? 1 : 0, websocket_redirect ? 1 : 0);
+             photon_trace ? 1 : 0, websocket_redirect ? 1 : 0,
+             sio_codec_trace ? 1 : 0);
     }
 
     if (il2cpp::thread_detach != nullptr) il2cpp::thread_detach(attached_thread);
