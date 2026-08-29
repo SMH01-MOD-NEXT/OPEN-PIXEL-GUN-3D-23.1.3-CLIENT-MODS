@@ -20,6 +20,7 @@
 #include "auth_scene_sweep_2313.h"
 #include "info_window_trace_2313.h"
 #include "await_trace_2313.h"
+#include "progress_apply_trace_2313.h"
 #include "progress_gate_trace_2313.h"
 #include "quiet_auth_trace_2313.h"
 #include "slot_config_trace_2313.h"
@@ -100,6 +101,7 @@ constexpr bool auth_state_trace = true;
 constexpr bool auth_scene_sweep = true;
 constexpr bool info_window_trace = true;
 constexpr bool await_trace = true;
+constexpr bool progress_apply_trace = true;
 constexpr bool progress_gate_trace = true;
 constexpr bool quiet_auth_trace = true;
 constexpr bool command_type_trace = true;
@@ -309,6 +311,14 @@ void* init_thread(void*) {
         "startup", "binded account gate trace",
         feature_config::startup::progress_gate_trace,
         []() { return progress_gate_trace_2313::install_hooks(); });
+    // Run 49 left one question open: the applier throws either because the
+    // consumer's cast produced a null or because the document it did receive
+    // is not the shape it expects. This reports which of the two happened and
+    // names the three keys the consumer reads, without changing any value.
+    (void)install_component(
+        "startup", "boot progress applier trace",
+        feature_config::startup::progress_apply_trace,
+        []() { return progress_apply_trace_2313::install_hooks(); });
     (void)install_component(
         "startup", "quiet authorization trace",
         feature_config::startup::quiet_auth_trace,
