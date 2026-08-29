@@ -13,27 +13,28 @@
 #include "il2cpp.h"
 #include "log.h"
 
-// Run 49 proved the boot progress answer reaches the client intact and is
-// still followed, four milliseconds later, by
+// The boot dies four milliseconds after the progress answer arrives:
 //
 //     NullReferenceException
 //       at Progress.<applier> (System.Collections.Generic.Dictionary`2)
 //       at AuthSceneController+<coroutine>[T].MoveNext ()
 //
-// The consumer at RVA 0x17AB704 reads three string literals out of the answer
-// it is given: the presence of the first turns the answer into err_code 1602,
-// the presence of the second ends it, and the value of the third is cast to
-// Dictionary<string, object> and handed to the applier at 0x2701830. A cast
-// that fails yields null and the applier throws on null, so the exception
-// reads the same whether the third key carries the wrong type or the applier
-// trips over the contents of a document it did receive.
+// Runs 50 to 52 hooked a second Progress method as the presumed caller and it
+// did not execute once, so the literals it reads named nothing on this path.
+// The stack trace was exact all along: the applier has only two callers, that
+// method and the coroutine's own MoveNext, and the return address the applier
+// reports, libil2cpp.so+0x3E753B8, is the instruction after the call at
+// 0x3E753B4 inside MoveNext. MoveNext awaits the request, takes the response
+// object the task produces, and hands the applier that object's member at
+// +0x18. The applier receives a null, so the member is empty, not merely of
+// the wrong shape.
 //
-// This trace separates those two cases and changes no value:
-//   * the applier reports whether it was handed a document or a null, which
-//     confirms or rules out the failing cast in a single run;
-//   * the three literal cells are read at applier entry, by which point the
-//     consumer has filled them, so the keys are named instead of guessed.
-//     Reading them any earlier prints uninitialised memory (run 41).
+// MoveNext belongs to a generic instantiation and cannot be named through the
+// metadata this hook wrapper resolves, so it is left alone. What can be read
+// instead is what the applier expects: it loads twelve metadata cells before
+// it touches the document, and those carry the key names it uses. They are
+// read at applier entry, once the runtime has filled them, because reading
+// earlier prints uninitialised memory (run 41).
 namespace progress_apply_trace_2313 {
 namespace detail {
 
@@ -89,10 +90,17 @@ inline void name_literals() {
     if (!elfsym::find_library("libil2cpp.so", &base) || base == 0) {
         return;
     }
+    // Every metadata cell the applier loads between 0x2701850 and 0x27018E4,
+    // before it ever looks at the document, so these are the names it looks
+    // the document up by. Some hold classes rather than string literals and
+    // are reported as such instead of being filtered out here on a guess.
     static constexpr LiteralCell kCells[] = {
-        {0x680DAC8, "key whose presence sets err_code to 1602"},
-        {0x67DB910, "key whose presence ends the answer"},
-        {0x6790A50, "key whose value is cast to the applier's dictionary"},
+        {0x674C6C0, "cell 0x674C6C0"}, {0x67730D0, "cell 0x67730D0"},
+        {0x67A4158, "cell 0x67A4158"}, {0x67B1BD8, "cell 0x67B1BD8"},
+        {0x67D15B0, "cell 0x67D15B0"}, {0x67FF088, "cell 0x67FF088"},
+        {0x6804380, "cell 0x6804380"}, {0x6813040, "cell 0x6813040"},
+        {0x681C048, "cell 0x681C048"}, {0x682C628, "cell 0x682C628"},
+        {0x683A688, "cell 0x683A688"}, {0x6846DB0, "cell 0x6846DB0"},
     };
     int named = 0;
     for (const LiteralCell& cell : kCells) {
@@ -112,6 +120,7 @@ inline void name_literals() {
         }
         const std::string klass = class_name(value);
         if (klass != "String") {
+            ++named;
             LOGI("23.1.3-apply: %s holds a %s, not a string", cell.what, klass.c_str());
             continue;
         }
@@ -122,7 +131,7 @@ inline void name_literals() {
         ++named;
         LOGI("23.1.3-apply: %s = \"%s\"", cell.what, text.c_str());
     }
-    if (named == 3) {
+    if (named == static_cast<int>(sizeof(kCells) / sizeof(kCells[0]))) {
         g_cells_named.store(true, std::memory_order_relaxed);
     }
 }
