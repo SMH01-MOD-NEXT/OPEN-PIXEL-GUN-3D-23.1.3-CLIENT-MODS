@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -45,9 +48,40 @@ struct LiteralCell {
 
 inline std::atomic<bool> g_cells_named{false};
 
-// A metadata-usage slot holds the address of the cell the runtime fills in on
-// first execution, so the literal needs two dereferences.
-inline void name_literals_once() {
+// A metadata-usage slot holds an encoded index until the runtime resolves it
+// on first execution, and only then the address of the cell that holds the
+// object. Run 50 read one that was still an index, 0xA000DF0F -- the 0xA0000000
+// marker is the string-literal usage type -- and dereferencing it killed the
+// process, exactly as run 40b did. So every hop is checked before it is taken.
+inline bool readable(const void* address, size_t length) {
+    const uintptr_t value = reinterpret_cast<uintptr_t>(address);
+    if (value < 0x100000u) {
+        return false;
+    }
+    // Managed pointers are eight-byte aligned; encoded indices rarely are, and
+    // this catches them before mincore() is asked about a nonsense page.
+    if ((value & 0x7u) != 0u) {
+        return false;
+    }
+    const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+    if (page == 0u) {
+        return false;
+    }
+    const uintptr_t first = value & ~(page - 1u);
+    const size_t span = static_cast<size_t>(value + length - first);
+    unsigned char resident[8];
+    if ((span + page - 1u) / page > sizeof(resident)) {
+        return false;
+    }
+    return mincore(reinterpret_cast<void*>(first), span, resident) == 0;
+}
+
+inline std::string class_name(void* object);
+
+// Names as many of the three cells as are resolved, and latches only once all
+// of them are, so a call that arrives before the consumer has filled them is
+// reported and then retried on the next one instead of being taken as final.
+inline void name_literals() {
     if (g_cells_named.load(std::memory_order_relaxed)) {
         return;
     }
@@ -60,21 +94,35 @@ inline void name_literals_once() {
         {0x67DB910, "key whose presence ends the answer"},
         {0x6790A50, "key whose value is cast to the applier's dictionary"},
     };
-    bool named = false;
+    int named = 0;
     for (const LiteralCell& cell : kCells) {
+        const void* slot_address = reinterpret_cast<const void*>(base + cell.offset);
+        if (!readable(slot_address, sizeof(void*))) {
+            continue;
+        }
         void** slot = *reinterpret_cast<void***>(base + cell.offset);
-        void* value = slot != nullptr ? *slot : nullptr;
-        if (value == nullptr) {
+        if (!readable(slot, sizeof(void*))) {
+            LOGI("23.1.3-apply: %s is not resolved yet (cell holds %p)",
+                 cell.what, static_cast<void*>(slot));
+            continue;
+        }
+        void* value = *slot;
+        if (!readable(value, 0x20)) {
+            continue;
+        }
+        const std::string klass = class_name(value);
+        if (klass != "String") {
+            LOGI("23.1.3-apply: %s holds a %s, not a string", cell.what, klass.c_str());
             continue;
         }
         const std::string text = il2cpp::to_utf8(value, 128);
         if (text.empty()) {
             continue;
         }
-        named = true;
+        ++named;
         LOGI("23.1.3-apply: %s = \"%s\"", cell.what, text.c_str());
     }
-    if (named) {
+    if (named == 3) {
         g_cells_named.store(true, std::memory_order_relaxed);
     }
 }
@@ -134,10 +182,13 @@ inline std::atomic<int32_t> g_applier_calls;
 void applier(void* document, const MethodInfo* method) {
     const int32_t call = g_applier_calls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (call <= kMaxReports) {
-        name_literals_once();
+        // Reported first and separately: this one line decides whether the
+        // consumer's cast failed, and it must survive anything that follows.
         const std::string document_class = class_name(document);
-        LOGI("23.1.3-apply: #%d applier document=%p %s count@0x20=%d",
-             call, document, document_class.c_str(), count_at_0x20(document));
+        LOGI("23.1.3-apply: #%d applier was handed %s document=%p %s count@0x20=%d",
+             call, document != nullptr ? "a document" : "a null", document,
+             document_class.c_str(), document != nullptr ? count_at_0x20(document) : -1);
+        name_literals();
     }
     if (g_applier != nullptr) {
         g_applier(document, method);
