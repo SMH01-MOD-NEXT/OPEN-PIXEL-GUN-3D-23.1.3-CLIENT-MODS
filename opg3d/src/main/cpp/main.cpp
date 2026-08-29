@@ -10,6 +10,19 @@
 #include "backend_client_2313.h"
 #include "backend_redirect_2313.h"
 #include "config.h"
+#include "config_ingest_trace_2313.h"
+#include "config_store_trace_2313.h"
+#include "debug_log_trace_2313.h"
+#include "config_system_trace_2313.h"
+#include "socket_dispatch_trace_2313.h"
+#include "auth_scene_trace_2313.h"
+#include "auth_state_trace_2313.h"
+#include "auth_scene_sweep_2313.h"
+#include "info_window_trace_2313.h"
+#include "await_trace_2313.h"
+#include "progress_gate_trace_2313.h"
+#include "quiet_auth_trace_2313.h"
+#include "slot_config_trace_2313.h"
 #include "elf_sym.h"
 #include "il2cpp.h"
 #include "il2cpp_runtime_2313.h"
@@ -56,6 +69,40 @@ constexpr bool startup_guards = true;
 constexpr bool switcher_trace = true;
 constexpr bool loading_stall_watchdog = true;
 constexpr bool anomaly_chain_trace = true;
+// Reads every configuration document the game accepts, together with the
+// source it came from (Embedded/Server/Fallback) and its ConfigId. The
+// boot stops on CommandsWithFullSlots missing the 23.1.3 version key, and
+// the document's field names exist nowhere in the metadata literals, so
+// this is the only way to learn the shape the backend has to serve.
+constexpr bool config_ingest_trace = true;
+
+// Names every inbound socket event and every handler registration. The
+// config parser has no static call site, so the only way it can run is a
+// delegate in the socket layer's subscriber registry, and runs 30-33 show
+// it never running while the answer arrives in full.
+constexpr bool socket_dispatch_trace = true;
+
+// Makes the game name the managed method that logs the
+// ParseFullSlotConfig failure: the native logger prints the RVA of
+// its own caller, which tools/resolve_rva.py resolves to a method.
+// The fourteen documents BalanceController accepts carry no version
+// dictionary, so the slot document has a different reader, and that
+// reader must be known before the backend can author a document the
+// client will parse.
+constexpr bool slot_config_trace = true;
+// Names every ConfigId that moves through the client's binary config
+// store, with the size of its document. The subscribe ack was refuted as
+// the delivery channel for the full-slot document in all three of its
+// possible spellings, so the store is where the question moves next.
+constexpr bool config_store_trace = true;
+constexpr bool auth_scene_trace = true;
+constexpr bool auth_state_trace = true;
+constexpr bool auth_scene_sweep = true;
+constexpr bool info_window_trace = true;
+constexpr bool await_trace = true;
+constexpr bool progress_gate_trace = true;
+constexpr bool quiet_auth_trace = true;
+constexpr bool command_type_trace = true;
 constexpr bool obb_provisioner = true;
 } // namespace startup
 
@@ -200,6 +247,72 @@ void* init_thread(void*) {
         "startup", "anomaly comparison trace",
         feature_config::startup::anomaly_chain_trace,
         []() { return anomaly_trace_2313::install_hooks(); });
+    // Diagnostic only, so its result is deliberately not folded into the
+    // completeness check below: a refused trace must not report the thin
+    // client as broken when every functional component is in place.
+    (void)install_component(
+        "startup", "config ingestion trace",
+        feature_config::startup::config_ingest_trace,
+        []() { return config_ingest_trace_2313::install_hooks(); });
+    // Shares the ingestion trace flag because it answers the same question
+    // from the other side: which managed component logs the config wait.
+    (void)install_component(
+        "startup", "managed log caller trace",
+        feature_config::startup::config_ingest_trace,
+        []() { return debug_log_trace_2313::install_hooks(); });
+    // Same flag once more, one layer deeper. Run 29 resolved the managed caller
+    // of the config wait line to an auth-scene iterator that polls one byte on
+    // the config system singleton, and the only code that writes that byte is
+    // the config system's answer parser -- whose third parameter is a
+    // List<byte[]>. This trace reads that shape out of the live process.
+    (void)install_component(
+        "startup", "config system trace",
+        feature_config::startup::config_ingest_trace,
+        []() { return config_system_trace_2313::install_hooks(); });
+    // Reads the other half of the same question: not whether the config
+    // system asks, but whether anything is listening when the answer is
+    // delivered to it.
+    (void)install_component(
+        "startup", "socket dispatch trace",
+        feature_config::startup::socket_dispatch_trace,
+        []() { return socket_dispatch_trace_2313::install_hooks(); });
+        (void)install_component("startup", "slot document reader trace",
+                                feature_config::startup::slot_config_trace,
+                                []() {
+                                    return slot_config_trace_2313::install_hooks();
+                                });
+    (void)install_component(
+        "startup", "config store trace",
+        feature_config::startup::config_store_trace,
+        []() { return config_store_trace_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "auth scene trace",
+        feature_config::startup::auth_scene_trace,
+        []() { return auth_scene_trace_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "auth state trace",
+        feature_config::startup::auth_state_trace,
+        []() { return auth_state_trace_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "auth scene sweep",
+        feature_config::startup::auth_scene_sweep,
+        []() { return auth_scene_sweep_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "info window trace",
+        feature_config::startup::info_window_trace,
+        []() { return info_window_trace_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "coroutine wait trace",
+        feature_config::startup::await_trace,
+        []() { return await_trace_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "binded account gate trace",
+        feature_config::startup::progress_gate_trace,
+        []() { return progress_gate_trace_2313::install_hooks(); });
+    (void)install_component(
+        "startup", "quiet authorization trace",
+        feature_config::startup::quiet_auth_trace,
+        []() { return quiet_auth_trace_2313::install_hooks(); });
 
     const bool backend_redirect = install_component(
         "network", "backend redirect", feature_config::network::backend_redirect,
