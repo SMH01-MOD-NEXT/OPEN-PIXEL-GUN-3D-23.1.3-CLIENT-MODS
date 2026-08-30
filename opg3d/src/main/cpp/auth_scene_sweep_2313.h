@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 
+#include "elf_sym.h"
 #include "hook.h"
 #include "il2cpp.h"
 #include "log.h"
@@ -32,6 +33,129 @@ using ReplyFn = void (*)(void* self, void* payload, bool flag, void* text,
 using StringFn = void (*)(void* self, void* text, const MethodInfo* method);
 
 constexpr int32_t kMaxReports = 4;
+
+// Run70 reached the last AuthSceneController iterator (created at 0x3DC3EE0)
+// immediately after create_slots, while the rendered screen stayed on Loading.
+// The iterator class is compiler generated, so hook its exact 23.1.3 MoveNext
+// RVA and report only state/current/delegate metadata. The stock body always
+// runs; this is observation only.
+constexpr uintptr_t kAuthorizedSyncMoveNextRva = 0x3DC8574;
+constexpr uintptr_t kFinalStartupMoveNextRva = 0x3DC9320;
+constexpr int32_t kIteratorStateOffset = 0x10;
+constexpr int32_t kIteratorCurrentOffset = 0x18;
+constexpr int32_t kIteratorOwnerOffset = 0x20;
+constexpr int32_t kIteratorTaskOffset = 0x28;
+constexpr int32_t kIteratorDelegatesOffset = 0x28;
+constexpr int32_t kIteratorIndexOffset = 0x30;
+constexpr size_t kManagedArrayDataOffset = 0x20u;
+constexpr size_t kDelegateMethodOffset = 0x10u;
+constexpr size_t kDelegateTargetOffset = 0x20u;
+
+using IteratorMoveNextFn = bool (*)(void* self, const MethodInfo* method);
+inline IteratorMoveNextFn g_authorized_sync_move_next = nullptr;
+inline IteratorMoveNextFn g_final_startup_move_next = nullptr;
+inline std::atomic<int32_t> g_authorized_sync_steps;
+inline std::atomic<int32_t> g_final_startup_steps;
+
+inline int32_t read_i32(void* object, int32_t offset) {
+    if (object == nullptr) return INT32_MIN;
+    return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(object) + offset);
+}
+
+inline void* read_ref(void* object, int32_t offset) {
+    if (object == nullptr) return nullptr;
+    return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(object) + offset);
+}
+
+inline const char* managed_class_name(void* object) {
+    if (object == nullptr) return "null";
+    if (il2cpp::object_get_class == nullptr || il2cpp::class_get_name == nullptr) {
+        return "unresolved";
+    }
+    void* klass = il2cpp::object_get_class(object);
+    const char* name = klass != nullptr ? il2cpp::class_get_name(klass) : nullptr;
+    return name != nullptr ? name : "unnamed";
+}
+
+inline int64_t array_length(void* array) {
+    if (array == nullptr) return -1;
+    return static_cast<int64_t>(*reinterpret_cast<uintptr_t*>(
+        reinterpret_cast<uint8_t*>(array) + 0x18));
+}
+
+inline void* array_element(void* array, int32_t index) {
+    const int64_t count = array_length(array);
+    if (array == nullptr || index < 0 || static_cast<int64_t>(index) >= count) {
+        return nullptr;
+    }
+    return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(array) +
+                                     kManagedArrayDataOffset +
+                                     static_cast<size_t>(index) * sizeof(void*));
+}
+
+inline unsigned long long il2cpp_rva(void* pointer) {
+    uintptr_t base = 0;
+    if (pointer == nullptr || !elfsym::find_library("libil2cpp.so", &base) ||
+        base == 0 || reinterpret_cast<uintptr_t>(pointer) < base) {
+        return 0ull;
+    }
+    return static_cast<unsigned long long>(
+        reinterpret_cast<uintptr_t>(pointer) - base);
+}
+
+inline void log_delegate(int32_t index, void* delegate) {
+    void* target = read_ref(delegate, static_cast<int32_t>(kDelegateTargetOffset));
+    void* function = read_ref(delegate, static_cast<int32_t>(kDelegateMethodOffset));
+    LOGI("23.1.3-finalauth-delegate: index=%d delegate=%p class=%s target=%p "
+         "targetClass=%s method=0x%llX",
+         index, delegate, managed_class_name(delegate), target,
+         managed_class_name(target), il2cpp_rva(function));
+}
+
+bool authorized_sync_move_next_thunk(void* self, const MethodInfo* method) {
+    const int32_t before = read_i32(self, kIteratorStateOffset);
+    void* task_before = read_ref(self, kIteratorTaskOffset);
+    const bool more = g_authorized_sync_move_next != nullptr
+                          ? g_authorized_sync_move_next(self, method)
+                          : false;
+    const int32_t after = read_i32(self, kIteratorStateOffset);
+    void* current = read_ref(self, kIteratorCurrentOffset);
+    void* owner = read_ref(self, kIteratorOwnerOffset);
+    void* task_after = read_ref(self, kIteratorTaskOffset);
+    const int32_t step =
+        g_authorized_sync_steps.fetch_add(1, std::memory_order_relaxed) + 1;
+    LOGI("23.1.3-authsync: step#%d state %d -> %d more=%d current=%p "
+         "class=%s owner=%p task=%p->%p taskClass=%s",
+         step, before, after, more ? 1 : 0, current,
+         managed_class_name(current), owner, task_before, task_after,
+         managed_class_name(task_after));
+    return more;
+}
+
+bool final_startup_move_next_thunk(void* self, const MethodInfo* method) {
+    const int32_t before = read_i32(self, kIteratorStateOffset);
+    const bool more = g_final_startup_move_next != nullptr
+                          ? g_final_startup_move_next(self, method)
+                          : false;
+    const int32_t after = read_i32(self, kIteratorStateOffset);
+    void* current = read_ref(self, kIteratorCurrentOffset);
+    void* owner = read_ref(self, kIteratorOwnerOffset);
+    void* delegates = read_ref(self, kIteratorDelegatesOffset);
+    const int32_t index = read_i32(self, kIteratorIndexOffset);
+    const int32_t step =
+        g_final_startup_steps.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (index > 0) {
+        log_delegate(index - 1, array_element(delegates, index - 1));
+    }
+    if (step <= 64 || before != after || !more) {
+        LOGI("23.1.3-finalauth: step#%d state %d -> %d more=%d current=%p "
+             "class=%s owner=%p delegates=%p count=%lld index=%d",
+             step, before, after, more ? 1 : 0, current,
+             managed_class_name(current), owner, delegates,
+             static_cast<long long>(array_length(delegates)), index);
+    }
+    return more;
+}
 
 constexpr int kVoidCount = 35;
 inline VoidFn g_void[kVoidCount] = {};
@@ -289,10 +413,29 @@ inline bool install_hooks() {
     armed += detail::install_string<0>(u8"丘丟丂丈丝丂丅丆东") ? 1 : 0;  // 0x3DC4C18
     armed += detail::install_string<1>(u8"丆与专且丑丙丑丘丘") ? 1 : 0;  // 0x3DC3988
     armed += detail::install_string<2>(u8"且丅世与上丕丕丁东") ? 1 : 0;  // 0x3DC6AD4
+    uintptr_t il2cpp_base = 0;
+    const bool found_il2cpp =
+        elfsym::find_library("libil2cpp.so", &il2cpp_base) && il2cpp_base != 0;
+    const bool authorized_sync_trace =
+        found_il2cpp && hook::install_address(
+            reinterpret_cast<void*>(il2cpp_base +
+                                    detail::kAuthorizedSyncMoveNextRva),
+            "23.1.3 Authorized sync parent iterator trace",
+            reinterpret_cast<void*>(&detail::authorized_sync_move_next_thunk),
+            reinterpret_cast<void**>(&detail::g_authorized_sync_move_next), false);
+    const bool final_startup_trace =
+        found_il2cpp && hook::install_address(
+            reinterpret_cast<void*>(il2cpp_base +
+                                    detail::kFinalStartupMoveNextRva),
+            "23.1.3 final AuthSceneController iterator trace",
+            reinterpret_cast<void*>(&detail::final_startup_move_next_thunk),
+            reinterpret_cast<void**>(&detail::g_final_startup_move_next), false);
     LOGI("23.1.3-sweep: auth scene sweep armed on %d/51 method(s) of "
-         "AuthSceneController; passive passthrough, first %d call(s) each",
-         armed, detail::kMaxReports);
-    return armed > 0;
+         "AuthSceneController; sync_parent=%d final_iterator=%d; passive "
+         "passthrough, first %d call(s) each",
+         armed, authorized_sync_trace ? 1 : 0, final_startup_trace ? 1 : 0,
+         detail::kMaxReports);
+    return armed > 0 || authorized_sync_trace || final_startup_trace;
 }
 
 } // namespace auth_scene_sweep_2313

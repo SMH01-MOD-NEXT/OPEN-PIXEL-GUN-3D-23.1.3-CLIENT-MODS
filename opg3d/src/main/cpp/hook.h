@@ -16,6 +16,13 @@ struct ManagedMethod {
 bool install(const ManagedMethod& target, void* replacement, void** original,
              bool required = false);
 
+// Installs a diagnostic hook on an address already validated by the caller.
+// This exists for generic IL2CPP bodies: their concrete shared entry point is
+// visible in native call sites but cannot be named unambiguously through the
+// open generic MethodInfo. Production behavior must continue using install().
+bool install_address(void* address, const char* label, void* replacement,
+                     void** original, bool required = false);
+
 // Human-readable version of the inline-hook engine (for logs).
 const char* engine_version();
 

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 
+#include "elf_sym.h"
 #include "hook.h"
 #include "il2cpp.h"
 #include "log.h"
@@ -99,6 +100,20 @@ constexpr const char* kEmbedded =
 constexpr const char* kIterator =
     u8"\u4e1c\u4e0b\u4e18\u4e0a\u4e17\u4e1e\u4e05\u4e06\u4e0c."
     u8"\u4e0e\u4e1e\u4e09\u4e02\u4e06\u4e08\u4e15\u4e0e\u4e1e";
+
+// Read side, added after run 63. The five configs the boot stops on are
+// stored successfully (`store id=... ok=1`) and their consumers still report a
+// null config seconds later, so the question is no longer delivery but what
+// the per-id read hands back. Both accessors are declared on the config system
+// class itself (TypeDefIndex 11094), not on the storage class that owns the
+// store method, which is why run 64 armed 9/11 with the wrong owner:
+//
+//   0x24981B0  internal string <kGetText>(ConfigId)
+//   0x24A0F34  internal byte[] <kGetBytes>(ConfigId)
+constexpr const char* kGetText =
+    u8"\u4e12\u4e0d\u4e0f\u4e00\u4e02\u4e08\u4e19\u4e1c\u4e1f";
+constexpr const char* kGetBytes =
+    u8"\u4e12\u4e1f\u4e0f\u4e0d\u4e1d\u4e0e\u4e15\u4e14\u4e1e";
 
 // Iterator layout: <>1__state at 0x10, <>2__current at 0x18.
 constexpr size_t kIterState = 0x10u;
@@ -317,6 +332,256 @@ inline bool hook_move_next(void* self, const MethodInfo* method) {
     return more;
 }
 
+using GetTextFn = void* (*)(void*, int32_t, const MethodInfo*);
+using GetBytesFn = void* (*)(void*, int32_t, const MethodInfo*);
+
+inline GetTextFn g_get_text = nullptr;
+inline GetBytesFn g_get_bytes = nullptr;
+
+inline std::atomic<uint32_t> g_get_text_calls{0u};
+inline std::atomic<uint32_t> g_get_bytes_calls{0u};
+
+// All six calls below compile to the same shared generic body. Hooking that
+// body and rejecting every other return address reveals the literal key passed
+// by the parser and reader without changing either dictionary.
+constexpr uintptr_t kTryGetValueRva = 0x468C2E0u;
+using TryGetValueFn = bool (*)(void*, void*, void**, const MethodInfo*);
+inline TryGetValueFn g_try_get_value = nullptr;
+inline uintptr_t g_il2cpp_base = 0;
+
+inline bool config_dictionary_call(uintptr_t rva) {
+    switch (rva) {
+        case 0x24A2934u: // parser: outer lookup, first path
+        case 0x24A2980u: // parser: inner lookup, first path
+        case 0x24A2AA4u: // parser: outer lookup, saved set
+        case 0x24A2AF0u: // parser: inner fingerprint lookup
+        case 0x24A0EC4u: // reader: outer ConfigId lookup
+        case 0x24A0F08u: // reader: inner text lookup
+        // refund_get callback nested dictionary lookups. These are passive
+        // observations of the live reply/config parser, not behavior changes.
+        case 0x3D04B98u:
+        case 0x3D04BF8u:
+        case 0x3D04C88u:
+        case 0x3D04D00u:
+        case 0x3D04F34u:
+        case 0x3D04FA8u:
+        case 0x3D0501Cu:
+        case 0x3D05074u:
+        case 0x3D050E8u:
+        case 0x3D052B4u:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The get_inapps subscriber at 0x294E108 delegates all reply parsing to
+// 0x294DF50. That parser asks one shared integer-reader for exactly three
+// fields. Trace only those return addresses so the backend reply schema comes
+// from the running client rather than from guessed product/in-app names.
+constexpr uintptr_t kGetInappsIntLookupRva = 0x468BAA0u;
+using GetInappsIntLookupFn = void (*)(void*, void*, int32_t*,
+                                     const MethodInfo*);
+inline GetInappsIntLookupFn g_get_inapps_int_lookup = nullptr;
+
+inline bool get_inapps_lookup_call(uintptr_t rva) {
+    switch (rva) {
+        case 0x294E02Cu:
+        case 0x294E040u:
+        case 0x294E054u:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// FriendsController installs 0x1D8F60C as the one-shot callback for
+// get_player_version. It tests one reply key through the shared
+// Dictionary<string, object>.ContainsKey body at 0x3B5F914 and returns early
+// when that key is absent. Run71 proved the generic acknowledgement takes that
+// early return while the final authorization initializer otherwise completes.
+// Trace the exact return site so the backend member name comes from the stock
+// client rather than another response-shape guess.
+constexpr uintptr_t kPlayerVersionContainsKeyRva = 0x3B5F914u;
+constexpr uintptr_t kPlayerVersionGetItemRva = 0x3B5F68Cu;
+constexpr uintptr_t kPlayerVersionContainsKeyReturnRva = 0x1D8F740u;
+constexpr uintptr_t kPlayerVersionGetItemReturnRva = 0x1D8F76Cu;
+using ReplyContainsKeyFn = bool (*)(void*, void*, const MethodInfo*);
+using ReplyGetItemFn = void* (*)(void*, void*, const MethodInfo*);
+inline ReplyContainsKeyFn g_reply_contains_key = nullptr;
+inline ReplyGetItemFn g_reply_get_item = nullptr;
+
+inline const char* reply_contains_flow(uintptr_t caller) {
+    if (caller == kPlayerVersionContainsKeyReturnRva) {
+        return "get_player_version";
+    }
+    if (caller == 0x33F1568u) {
+        // get_progress_slots callback at 0x33F145C, immediately after its
+        // single top-level ContainsKey call.
+        return "get_progress_slots";
+    }
+    switch (caller) {
+        case 0x3D03EF8u:
+        case 0x3D03F7Cu:
+        case 0x3D041BCu:
+        case 0x3D04280u:
+        case 0x3D043ECu:
+        case 0x3D04658u:
+        case 0x3D04D64u:
+            return "refund_get";
+        default:
+            return nullptr;
+    }
+}
+
+inline const char* reply_get_item_flow(uintptr_t caller) {
+    if (caller == kPlayerVersionGetItemReturnRva) {
+        return "get_player_version";
+    }
+    if (caller == 0x33F1594u) {
+        // Value paired with the ContainsKey call above. Logging its runtime
+        // class checks that the backend served Dictionary<string, object>.
+        return "get_progress_slots";
+    }
+    switch (caller) {
+        case 0x3D03F14u:
+        case 0x3D03F94u:
+        case 0x3D041D0u:
+        case 0x3D04294u:
+        case 0x3D0466Cu:
+        case 0x3D04D98u:
+            return "refund_get";
+        default:
+            return nullptr;
+    }
+}
+
+inline bool hook_player_version_contains_key(void* dictionary, void* key,
+                                             const MethodInfo* method) {
+    const void* raw =
+        __builtin_extract_return_addr(__builtin_return_address(0));
+    const uintptr_t pc = reinterpret_cast<uintptr_t>(raw) & ~uintptr_t{1};
+    const uintptr_t caller =
+        g_il2cpp_base != 0 && pc >= g_il2cpp_base ? pc - g_il2cpp_base : 0;
+    const char* flow = reply_contains_flow(caller);
+    const std::string key_text = flow != nullptr ? text_of(key) : std::string();
+    const bool present = g_reply_contains_key != nullptr
+                             ? g_reply_contains_key(dictionary, key, method)
+                             : false;
+    if (flow != nullptr) {
+        LOGI("23.1.3-replykey: flow=%s op=ContainsKey caller=0x%llx "
+             "key='%s' present=%d dictionary=%p count@0x20=%d count@0x28=%d",
+             flow, static_cast<unsigned long long>(caller), key_text.c_str(),
+             present ? 1 : 0, dictionary,
+             read_i32(dictionary, kDictCountFramework),
+             read_i32(dictionary, kDictCountCoreLib));
+    }
+    return present;
+}
+
+inline void* hook_reply_get_item(void* dictionary, void* key,
+                                 const MethodInfo* method) {
+    const void* raw =
+        __builtin_extract_return_addr(__builtin_return_address(0));
+    const uintptr_t pc = reinterpret_cast<uintptr_t>(raw) & ~uintptr_t{1};
+    const uintptr_t caller =
+        g_il2cpp_base != 0 && pc >= g_il2cpp_base ? pc - g_il2cpp_base : 0;
+    const char* flow = reply_get_item_flow(caller);
+    const std::string key_text = flow != nullptr ? text_of(key) : std::string();
+    void* value = g_reply_get_item != nullptr
+                      ? g_reply_get_item(dictionary, key, method)
+                      : nullptr;
+    if (flow != nullptr) {
+        const char* value_class = class_name_of(value);
+        const std::string value_text =
+            std::string(value_class) == "String" ? text_of(value) : std::string();
+        LOGI("23.1.3-replykey: flow=%s op=get_Item caller=0x%llx key='%s' "
+             "value=%p class=%s text='%s'",
+             flow, static_cast<unsigned long long>(caller), key_text.c_str(),
+             value, value_class, value_text.c_str());
+    }
+    return value;
+}
+
+inline void hook_get_inapps_int_lookup(void* dictionary, void* key,
+                                       int32_t* out_value,
+                                       const MethodInfo* method) {
+    const void* raw =
+        __builtin_extract_return_addr(__builtin_return_address(0));
+    const uintptr_t pc = reinterpret_cast<uintptr_t>(raw) & ~uintptr_t{1};
+    const uintptr_t caller =
+        g_il2cpp_base != 0 && pc >= g_il2cpp_base ? pc - g_il2cpp_base : 0;
+    const bool wanted = get_inapps_lookup_call(caller);
+    const std::string key_text = wanted ? text_of(key) : std::string();
+    if (g_get_inapps_int_lookup != nullptr) {
+        g_get_inapps_int_lookup(dictionary, key, out_value, method);
+    }
+    if (wanted) {
+        LOGI("23.1.3-inapps: parser caller=0x%llx key='%s' value=%d dict=%p",
+             static_cast<unsigned long long>(caller), key_text.c_str(),
+             out_value != nullptr ? *out_value : INT32_MIN, dictionary);
+    }
+}
+
+inline bool hook_try_get_value(void* dictionary, void* key, void** out_value,
+                               const MethodInfo* method) {
+    const void* raw =
+        __builtin_extract_return_addr(__builtin_return_address(0));
+    const uintptr_t pc = reinterpret_cast<uintptr_t>(raw) & ~uintptr_t{1};
+    const uintptr_t caller =
+        g_il2cpp_base != 0 && pc >= g_il2cpp_base ? pc - g_il2cpp_base : 0;
+    const bool wanted = config_dictionary_call(caller);
+    const char* key_class = wanted ? class_name_of(key) : "";
+    const std::string key_text =
+        wanted && std::string(key_class) == "String" ? text_of(key) : std::string();
+
+    bool hit = false;
+    if (g_try_get_value != nullptr) {
+        hit = g_try_get_value(dictionary, key, out_value, method);
+    }
+    if (wanted) {
+        void* value = out_value != nullptr ? *out_value : nullptr;
+        const char* value_class = class_name_of(value);
+        const std::string value_text =
+            std::string(value_class) == "String" ? text_of(value) : std::string();
+        LOGI("23.1.3-cfgdict: caller=0x%llx dict=%p count@0x20=%d count@0x28=%d "
+             "key=%p class=%s text='%s' hit=%d value=%p class=%s text='%s'",
+             static_cast<unsigned long long>(caller), dictionary,
+             read_i32(dictionary, kDictCountFramework),
+             read_i32(dictionary, kDictCountCoreLib), key, key_class,
+             key_text.c_str(), hit ? 1 : 0, value, value_class,
+             value_text.c_str());
+    }
+    return hit;
+}
+
+// Both read hooks call the original first and report what it returned, so a
+// consumer that logs a null config can be matched to the exact id it asked for
+// and to whether the storage answered with our document or with nothing.
+inline void* hook_get_text(void* self, int32_t id, const MethodInfo* method) {
+    void* result = nullptr;
+    if (g_get_text != nullptr) {
+        result = g_get_text(self, id, method);
+    }
+    const uint32_t call = g_get_text_calls.fetch_add(1u) + 1u;
+    const std::string head = text_of(result);
+    LOGI("23.1.3-cfgsys: #%u get-text id=%d null=%d chars=%d head='%s'", call,
+         id, result == nullptr ? 1 : 0, static_cast<int>(head.size()),
+         head.c_str());
+    return result;
+}
+
+inline void* hook_get_bytes(void* self, int32_t id, const MethodInfo* method) {
+    void* result = nullptr;
+    if (g_get_bytes != nullptr) {
+        result = g_get_bytes(self, id, method);
+    }
+    const uint32_t call = g_get_bytes_calls.fetch_add(1u) + 1u;
+    LOGI("23.1.3-cfgsys: #%u get-bytes id=%d bytes=%d", call, id,
+         result == nullptr ? -1 : read_i32(result, kArrayLength));
+    return result;
+}
+
 } // namespace detail
 
 // Installs the four trace points. None is required: a build where a name no
@@ -372,13 +637,60 @@ inline bool install_hooks() {
                  ? 1
                  : 0;
 
-    LOGI("23.1.3-cfgsys: config system trace armed on %d/9 entry point(s) in "
+    armed += hook::install({detail::kNamespace, detail::kConfigSystem, detail::kGetText, 1},
+                           reinterpret_cast<void*>(&detail::hook_get_text),
+                           reinterpret_cast<void**>(&detail::g_get_text), false)
+                 ? 1
+                 : 0;
+    armed += hook::install({detail::kNamespace, detail::kConfigSystem, detail::kGetBytes, 1},
+                           reinterpret_cast<void*>(&detail::hook_get_bytes),
+                           reinterpret_cast<void**>(&detail::g_get_bytes), false)
+                 ? 1
+                 : 0;
+
+    uintptr_t il2cpp_base = 0;
+    const bool found_il2cpp =
+        elfsym::find_library("libil2cpp.so", &il2cpp_base) && il2cpp_base != 0;
+    detail::g_il2cpp_base = found_il2cpp ? il2cpp_base : 0;
+    const bool dictionary_trace =
+        found_il2cpp && hook::install_address(
+            reinterpret_cast<void*>(il2cpp_base + detail::kTryGetValueRva),
+            "23.1.3 config Dictionary.TryGetValue trace",
+            reinterpret_cast<void*>(&detail::hook_try_get_value),
+            reinterpret_cast<void**>(&detail::g_try_get_value), false);
+    const bool get_inapps_trace =
+        found_il2cpp && hook::install_address(
+            reinterpret_cast<void*>(il2cpp_base +
+                                    detail::kGetInappsIntLookupRva),
+            "23.1.3 get_inapps integer reply trace",
+            reinterpret_cast<void*>(&detail::hook_get_inapps_int_lookup),
+            reinterpret_cast<void**>(&detail::g_get_inapps_int_lookup), false);
+    const bool player_version_trace =
+        found_il2cpp && hook::install_address(
+            reinterpret_cast<void*>(
+                il2cpp_base + detail::kPlayerVersionContainsKeyRva),
+            "23.1.3 get_player_version reply-key trace",
+            reinterpret_cast<void*>(&detail::hook_player_version_contains_key),
+            reinterpret_cast<void**>(&detail::g_reply_contains_key), false);
+    const bool reply_getter_trace =
+        found_il2cpp && hook::install_address(
+            reinterpret_cast<void*>(il2cpp_base +
+                                    detail::kPlayerVersionGetItemRva),
+            "23.1.3 selected socket reply value trace",
+            reinterpret_cast<void*>(&detail::hook_reply_get_item),
+            reinterpret_cast<void**>(&detail::g_reply_get_item), false);
+
+    LOGI("23.1.3-cfgsys: config system trace armed on %d/11 entry point(s), "
+         "dictionary=%d, get_inapps=%d, reply_keys=%d, reply_values=%d, in "
          "namespace %s; "
          "parse/toInt/apply/store answer the delivery question, "
          "groups/request/namemap/embedded/step answer the request question, "
          "apply=document text, store=binary config storage",
-         armed, detail::kNamespace);
-    return armed > 0;
+         armed, dictionary_trace ? 1 : 0, get_inapps_trace ? 1 : 0,
+         player_version_trace ? 1 : 0, reply_getter_trace ? 1 : 0,
+         detail::kNamespace);
+    return armed > 0 || dictionary_trace || get_inapps_trace ||
+           player_version_trace || reply_getter_trace;
 }
 
 } // namespace config_system_trace_2313

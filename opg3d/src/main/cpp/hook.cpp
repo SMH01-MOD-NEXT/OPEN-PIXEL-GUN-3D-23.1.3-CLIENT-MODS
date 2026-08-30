@@ -40,6 +40,44 @@ const char* engine_version() {
     return shadowhook_get_version();
 }
 
+bool install_address(void* address, const char* label, void* replacement,
+                     void** original, bool required) {
+    const char* name = label != nullptr ? label : "diagnostic address";
+    if (address == nullptr || replacement == nullptr || original == nullptr) {
+        LOGE("hook: invalid arguments for %s", name);
+        return false;
+    }
+
+    ensure_engine();
+    if (!g_engine_ready) {
+        LOGE("hook: engine unavailable; cannot hook %s", name);
+        return false;
+    }
+
+    *original = nullptr;
+    void* stub = shadowhook_hook_func_addr(address, replacement, original);
+    if (stub == nullptr) {
+        const int err = shadowhook_get_errno();
+        if (required) {
+            LOGE("hook: REQUIRED address hook failed errno=%d (%s): %s @ %p",
+                 err, shadowhook_to_errmsg(err), name, address);
+        } else {
+            LOGW("hook: optional address hook failed errno=%d (%s): %s @ %p",
+                 err, shadowhook_to_errmsg(err), name, address);
+        }
+        return false;
+    }
+    if (*original == nullptr) {
+        LOGE("hook: engine gave no trampoline for %s @ %p; rolling back",
+             name, address);
+        shadowhook_unhook(stub);
+        return false;
+    }
+
+    LOGI("hook: installed %s @ %p", name, address);
+    return true;
+}
+
 bool install(const ManagedMethod& target, void* replacement, void** original,
              bool required) {
     if (replacement == nullptr || original == nullptr) {

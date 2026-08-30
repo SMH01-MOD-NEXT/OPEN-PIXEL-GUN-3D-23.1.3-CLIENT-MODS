@@ -37,17 +37,22 @@ using LogFn = void (*)(void*, const MethodInfo*);
 constexpr const char* kUnityNamespace = "UnityEngine";
 constexpr const char* kDebugClass = "Debug";
 constexpr const char* kLog = "Log";
+constexpr const char* kLogError = "LogError";
 
 inline LogFn g_log = nullptr;
+inline LogFn g_log_error = nullptr;
 inline std::atomic<uint32_t> g_hits{0u};
 inline std::atomic<uint32_t> g_seen{0u};
 
 // This client logs thousands of lines per boot, so only the messages that bear
-// on the current stop are printed.
+// on the current stop are printed. The `----` needle is what the five config
+// consumers stuck at 90% use as their prefix separator, so it names all of
+// them without listing each one.
 inline bool interesting(const std::string& text) {
     static const char* kNeedles[] = {"wait config", "config response",
                                      "is null or empty", "ClanCommon",
-                                     "Start wait", "wait socket"};
+                                     "Start wait", "wait socket",
+                                     "----", "parse error"};
     for (const char* needle : kNeedles) {
         if (text.find(needle) != std::string::npos) return true;
     }
@@ -82,6 +87,26 @@ void hook_log(void* message, const MethodInfo* method) {
     }
 }
 
+// The five configs the boot stops on report themselves through
+// Debug.LogError, which is a different managed method, so the Debug.Log hook
+// above never sees them. Same filter, same pc= field, same passthrough.
+void hook_log_error(void* message, const MethodInfo* method) {
+    g_seen.fetch_add(1u);
+    if (message != nullptr &&
+        std::strcmp(class_name_of(message), "String") == 0) {
+        const std::string text = il2cpp::to_utf8(message, 256u);
+        if (interesting(text)) {
+            const uint32_t n = g_hits.fetch_add(1u) + 1u;
+            LOGI("23.1.3-dbglog: #%u managed caller of Debug.LogError "
+                 "text='%s'",
+                 n, text.c_str());
+        }
+    }
+    if (g_log_error != nullptr) {
+        g_log_error(message, method);
+    }
+}
+
 } // namespace detail
 
 inline bool install_hooks() {
@@ -89,10 +114,15 @@ inline bool install_hooks() {
         {detail::kUnityNamespace, detail::kDebugClass, detail::kLog, 1},
         reinterpret_cast<void*>(&detail::hook_log),
         reinterpret_cast<void**>(&detail::g_log), false);
-    LOGI("23.1.3-dbglog: Debug.Log(object) trace %s; for every matching line "
-         "the pc= field is the managed caller to resolve against dump2313.cs",
-         armed ? "armed" : "refused");
-    return armed;
+    const bool armed_error = hook::install(
+        {detail::kUnityNamespace, detail::kDebugClass, detail::kLogError, 1},
+        reinterpret_cast<void*>(&detail::hook_log_error),
+        reinterpret_cast<void**>(&detail::g_log_error), false);
+    LOGI("23.1.3-dbglog: Debug.Log(object) trace %s, Debug.LogError(object) "
+         "trace %s; for every matching line the pc= field is the managed "
+         "caller to resolve against dump2313.cs",
+         armed ? "armed" : "refused", armed_error ? "armed" : "refused");
+    return armed || armed_error;
 }
 
 } // namespace debug_log_trace_2313
