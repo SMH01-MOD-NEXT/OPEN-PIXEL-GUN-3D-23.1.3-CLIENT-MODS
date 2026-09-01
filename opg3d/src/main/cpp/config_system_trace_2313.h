@@ -1,9 +1,16 @@
 #pragma once
 
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <mutex>
 #include <string>
+#include <unordered_set>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "elf_sym.h"
 #include "hook.h"
@@ -136,6 +143,11 @@ constexpr size_t kListSize = 0x18u;
 constexpr size_t kArrayLength = 0x18u;
 
 constexpr size_t kTextPreview = 160u;
+
+// A manifest does not fit in a log line, so the whole document is written to a
+// file once per id. Temporary: it exists to recover the exact documents this
+// server has to host, and comes out once they are hosted.
+constexpr size_t kDocumentDumpLimit = 1u << 20;
 constexpr uint32_t kVerboseCalls = 24u;
 
 using ParseFn = void (*)(void*, void*, void*, void*, const MethodInfo*);
@@ -389,6 +401,7 @@ inline bool get_inapps_lookup_call(uintptr_t rva) {
         case 0x294E02Cu:
         case 0x294E040u:
         case 0x294E054u:
+        case 0x33F12F8u:  // get_progress callback
             return true;
         default:
             return false;
@@ -415,10 +428,42 @@ inline const char* reply_contains_flow(uintptr_t caller) {
     if (caller == kPlayerVersionContainsKeyReturnRva) {
         return "get_player_version";
     }
+    if (caller == 0x17A9A70u || caller == 0x17A9AE4u) {
+        // Progress flag handler for progress_status (0x17A9980). These are
+        // the return addresses of its two membership tests, which decide
+        // the static Nullable<bool> that the auth
+        // scene fork at 0x3DC9854 reads before it starts the coroutine that
+        // carries the boot past 90%.
+        return "progress_status";
+    }
+    if (caller == 0x33F124Cu) {
+        // get_progress callback at 0x33F1114. The value behind this key is
+        // accepted only when it is a HashSet<string>.
+        return "get_progress";
+    }
     if (caller == 0x33F1568u) {
         // get_progress_slots callback at 0x33F145C, immediately after its
         // single top-level ContainsKey call.
         return "get_progress_slots";
+    }
+    if (caller == 0x2BC0B4Cu) {
+        // GameModeEvents JSON root: this names the required top-level member.
+        // The stock return value is passed through unchanged.
+        return "gme_root";
+    }
+    if (caller == 0x2BC1014u) {
+        return "gme_event_id";
+    }
+    if (caller == 0x2BC1098u) {
+        return "gme_owner_id";
+    }
+    if (caller == 0x17AB878u || caller == 0x17AB8C4u ||
+        caller == 0x17AB8F4u) {
+        // sync_full callback at 0x17AB704. The first optional marker adds the
+        // stock 1602 code, the second tests the error-code member, and the
+        // third optionally applies a server document. Run 151 names all three
+        // keys without changing the reply or either branch.
+        return "sync_full";
     }
     switch (caller) {
         case 0x3D03EF8u:
@@ -438,10 +483,29 @@ inline const char* reply_get_item_flow(uintptr_t caller) {
     if (caller == kPlayerVersionGetItemReturnRva) {
         return "get_player_version";
     }
+    if (caller == 0x17A9B10u) {
+        // Value paired with the progress_status membership tests above.
+        return "progress_status";
+    }
+    if (caller == 0x33F1268u) {
+        return "get_progress";
+    }
     if (caller == 0x33F1594u) {
         // Value paired with the ContainsKey call above. Logging its runtime
         // class checks that the backend served Dictionary<string, object>.
         return "get_progress_slots";
+    }
+    if (caller == 0x2BC0B70u) {
+        return "gme_root";
+    }
+    if (caller == 0x2BC1034u) {
+        return "gme_event_id";
+    }
+    if (caller == 0x2BC10CCu) {
+        return "gme_owner_id";
+    }
+    if (caller == 0x17AB918u || caller == 0x17ABA80u) {
+        return "sync_full";
     }
     switch (caller) {
         case 0x3D03F14u:
@@ -499,6 +563,12 @@ inline void* hook_reply_get_item(void* dictionary, void* key,
              "value=%p class=%s text='%s'",
              flow, static_cast<unsigned long long>(caller), key_text.c_str(),
              value, value_class, value_text.c_str());
+        if (std::string(flow) == "gme_root") {
+            LOGI("23.1.3-gme-root: key='%s' value=%p class=%s "
+                 "listSize@0x18=%d -- passive",
+                 key_text.c_str(), value, value_class,
+                 read_i32(value, kListSize));
+        }
     }
     return value;
 }
@@ -517,7 +587,7 @@ inline void hook_get_inapps_int_lookup(void* dictionary, void* key,
         g_get_inapps_int_lookup(dictionary, key, out_value, method);
     }
     if (wanted) {
-        LOGI("23.1.3-inapps: parser caller=0x%llx key='%s' value=%d dict=%p",
+        LOGI("23.1.3-replyint: parser caller=0x%llx key='%s' value=%d dict=%p",
              static_cast<unsigned long long>(caller), key_text.c_str(),
              out_value != nullptr ? *out_value : INT32_MIN, dictionary);
     }
@@ -558,12 +628,47 @@ inline bool hook_try_get_value(void* dictionary, void* key, void** out_value,
 // Both read hooks call the original first and report what it returned, so a
 // consumer that logs a null config can be matched to the exact id it asked for
 // and to whether the storage answered with our document or with nothing.
+// Saves a document whole, once per id, in the app's own external files
+// directory, so the text the client reads can be compared with what this
+// server hosts instead of being guessed from a truncated preview.
+inline void dump_document_once(int32_t id, void* text_object) {
+    static std::mutex mutex;
+    static std::unordered_set<int32_t> dumped;
+    {
+        const std::lock_guard<std::mutex> guard(mutex);
+        if (!dumped.insert(id).second) return;
+    }
+    const std::string text = il2cpp::to_utf8(text_object, kDocumentDumpLimit);
+    if (text.empty()) return;
+    char path[192];
+    std::snprintf(path, sizeof(path),
+                  "/storage/emulated/0/Android/data/com.pixel.gun3d/files/"
+                  "opg3d-doc-%d.json",
+                  id);
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        LOGW("23.1.3-cfgsys: cannot write %s (errno=%d)", path, errno);
+        return;
+    }
+    size_t written = 0u;
+    while (written < text.size()) {
+        const ssize_t chunk =
+            ::write(fd, text.data() + written, text.size() - written);
+        if (chunk <= 0) break;
+        written += static_cast<size_t>(chunk);
+    }
+    ::close(fd);
+    LOGI("23.1.3-cfgsys: document %d saved %zu/%zu char(s) -> %s", id, written,
+         text.size(), path);
+}
+
 inline void* hook_get_text(void* self, int32_t id, const MethodInfo* method) {
     void* result = nullptr;
     if (g_get_text != nullptr) {
         result = g_get_text(self, id, method);
     }
     const uint32_t call = g_get_text_calls.fetch_add(1u) + 1u;
+    if (result != nullptr) dump_document_once(id, result);
     const std::string head = text_of(result);
     LOGI("23.1.3-cfgsys: #%u get-text id=%d null=%d chars=%d head='%s'", call,
          id, result == nullptr ? 1 : 0, static_cast<int>(head.size()),

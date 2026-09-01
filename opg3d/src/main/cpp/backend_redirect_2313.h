@@ -68,6 +68,10 @@ constexpr const char* kBackendHosts[] = {
     "pixelgun3d.com",
     "pixelgunserver.com",
     "lightmap.com",
+    // The asset bundle CDN. It still answers, but the point of this project is
+    // that a LAN install owns its content: the backend serves the same
+    // <name>/<md5>/<name> objects from disk.
+    "akamaized.net",
 };
 
 constexpr uint64_t kLogBurst = 24u;

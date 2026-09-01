@@ -44,17 +44,62 @@ inline LogFn g_log_error = nullptr;
 inline std::atomic<uint32_t> g_hits{0u};
 inline std::atomic<uint32_t> g_seen{0u};
 
-// This client logs thousands of lines per boot, so only the messages that bear
-// on the current stop are printed. The `----` needle is what the five config
-// consumers stuck at 90% use as their prefix separator, so it names all of
-// them without listing each one.
+// Runs up to 87 filtered this trace down to a handful of needles, and that is
+// why the message after `Start wait info about Game Center` never appeared:
+// the filter was silent, not the client. The boot is clean enough now to
+// afford the whole stream, so every distinct managed log line is printed once
+// and repeats are suppressed. The needles below keep their old behaviour and
+// print on every occurrence; the `----` needle is the prefix separator the
+// config consumers use, so it names all of them without listing each one.
 inline bool interesting(const std::string& text) {
     static const char* kNeedles[] = {"wait config", "config response",
                                      "is null or empty", "ClanCommon",
-                                     "Start wait", "wait socket",
+                                     "Start wait", "End wait", "wait socket",
                                      "----", "parse error"};
     for (const char* needle : kNeedles) {
         if (text.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// Open-addressed table of message hashes, so a repeated line costs one probe
+// and prints nothing. A trace can tolerate a lost race, so the slots are plain
+// atomics and the probe gives up instead of blocking the game thread.
+constexpr uint32_t kSeenSlots = 8192u;
+constexpr uint32_t kDistinctBudget = 4000u;
+inline std::atomic<uint64_t> g_seen_hash[kSeenSlots];
+inline std::atomic<uint32_t> g_distinct{0u};
+
+inline uint64_t hash_of(const std::string& text) {
+    uint64_t h = 1469598103934665603ull;
+    for (const char c : text) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 1099511628211ull;
+    }
+    // Zero marks an empty slot, so it can never be a live hash.
+    return h | 1ull;
+}
+
+// True the first time this exact message is seen, false for every repeat.
+inline bool first_time(const std::string& text) {
+    if (g_distinct.load(std::memory_order_relaxed) >= kDistinctBudget) {
+        return false;
+    }
+    const uint64_t h = hash_of(text);
+    uint32_t slot = static_cast<uint32_t>(h) & (kSeenSlots - 1u);
+    for (uint32_t probe = 0u; probe < 32u; ++probe) {
+        const uint64_t held = g_seen_hash[slot].load(std::memory_order_relaxed);
+        if (held == h) return false;
+        if (held == 0ull) {
+            uint64_t expected = 0ull;
+            if (g_seen_hash[slot].compare_exchange_strong(
+                    expected, h, std::memory_order_relaxed)) {
+                g_distinct.fetch_add(1u, std::memory_order_relaxed);
+                return true;
+            }
+            if (expected == h) return false;
+        }
+        slot = (slot + 1u) & (kSeenSlots - 1u);
     }
     return false;
 }
@@ -75,8 +120,8 @@ void hook_log(void* message, const MethodInfo* method) {
     g_seen.fetch_add(1u);
     if (message != nullptr &&
         std::strcmp(class_name_of(message), "String") == 0) {
-        const std::string text = il2cpp::to_utf8(message, 256u);
-        if (interesting(text)) {
+        const std::string text = il2cpp::to_utf8(message, 512u);
+        if (interesting(text) || first_time(text)) {
             const uint32_t n = g_hits.fetch_add(1u) + 1u;
             LOGI("23.1.3-dbglog: #%u managed caller of Debug.Log text='%s'", n,
                  text.c_str());
@@ -94,8 +139,8 @@ void hook_log_error(void* message, const MethodInfo* method) {
     g_seen.fetch_add(1u);
     if (message != nullptr &&
         std::strcmp(class_name_of(message), "String") == 0) {
-        const std::string text = il2cpp::to_utf8(message, 256u);
-        if (interesting(text)) {
+        const std::string text = il2cpp::to_utf8(message, 512u);
+        if (interesting(text) || first_time(text)) {
             const uint32_t n = g_hits.fetch_add(1u) + 1u;
             LOGI("23.1.3-dbglog: #%u managed caller of Debug.LogError "
                  "text='%s'",
