@@ -11,5 +11,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = 'old-pixel-gun-online'
+rootProject.name = 'OLD-PIXEL-GUN-3D-2313-FRONTEND'
 include ':opg3d'

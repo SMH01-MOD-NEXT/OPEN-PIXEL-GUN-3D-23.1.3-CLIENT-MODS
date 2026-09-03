@@ -9,8 +9,8 @@ captures/
 .navigation/
 output-metadata.json
 
-# native build
-# lib/arm64-v8a is where every build drops libopg3d.so for repacking
+# Native build
+# lib/arm64-v8a is where every build exports libopg3d.so for repacking.
 lib/
 out/
 cmake-*/
@@ -27,10 +27,11 @@ compile_commands.json
 .DS_Store
 Thumbs.db
 
-# analysis artefacts and generated wrappers (never committed)
+# Analysis inputs and local planning
 TASK_PLAN.md
 analys2313/
-gradle/
-gradlew
-gradlew.bat
 tools/__pycache__/
+
+# Device evidence and local run logs
+log_front_run*.txt
+front-run*.log
