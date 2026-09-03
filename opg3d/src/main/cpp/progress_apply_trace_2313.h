@@ -53,6 +53,7 @@ struct LiteralCell {
 };
 
 inline std::atomic<bool> g_cells_named{false};
+inline std::atomic<bool> g_last_command_cells_named{false};
 
 // A metadata-usage slot holds an encoded index until the runtime resolves it
 // on first execution, and only then the address of the cell that holds the
@@ -134,6 +135,45 @@ inline void name_literals() {
     }
     if (named == static_cast<int>(sizeof(kCells) / sizeof(kCells[0]))) {
         g_cells_named.store(true, std::memory_order_relaxed);
+    }
+}
+
+inline void name_last_command_literals() {
+    if (g_last_command_cells_named.load(std::memory_order_relaxed)) {
+        return;
+    }
+    uintptr_t base = 0;
+    if (!elfsym::find_library("libil2cpp.so", &base) || base == 0) {
+        return;
+    }
+    static constexpr LiteralCell kCells[] = {
+        {0x67DB910, "get_last_command early-return key"},
+        {0x6831FA0, "get_last_command command key"},
+        {0x67FE470, "get_last_command id key"},
+    };
+    int named = 0;
+    for (const LiteralCell& cell : kCells) {
+        const void* slot_address = reinterpret_cast<const void*>(base + cell.offset);
+        if (!readable(slot_address, sizeof(void*))) {
+            continue;
+        }
+        void** slot = *reinterpret_cast<void***>(base + cell.offset);
+        if (!readable(slot, sizeof(void*))) {
+            continue;
+        }
+        void* value = *slot;
+        if (!readable(value, 0x20) || class_name(value) != "String") {
+            continue;
+        }
+        const std::string text = il2cpp::to_utf8(value, 128);
+        if (text.empty()) {
+            continue;
+        }
+        ++named;
+        LOGI("23.1.3-lastcmd: %s = \"%s\"", cell.what, text.c_str());
+    }
+    if (named == static_cast<int>(sizeof(kCells) / sizeof(kCells[0]))) {
+        g_last_command_cells_named.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -269,6 +309,76 @@ int32_t code_reader(void* self, void* head, const MethodInfo* method) {
     return code;
 }
 
+using LastCommandHandler = void (*)(void*, void*, void*, void*, const MethodInfo*);
+inline LastCommandHandler g_last_command_handler = nullptr;
+inline std::atomic<int32_t> g_last_command_handler_calls;
+
+void last_command_handler(void* self, void* head, void* args, void* attachments,
+                          const MethodInfo* method) {
+    const int32_t call =
+        g_last_command_handler_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= kMaxReports) {
+        LOGI("23.1.3-lastcmd: #%d ENTER self=%p head=%p %s count=%d", call, self,
+             head, class_name(head).c_str(), count_at_0x20(head));
+        report_head_entries(head);
+    }
+    if (g_last_command_handler != nullptr) {
+        g_last_command_handler(self, head, args, attachments, method);
+    }
+    if (call <= kMaxReports && readable(self, 0x28)) {
+        void* command = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(self) + 0x18);
+        void* command_id = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(self) + 0x20);
+        const std::string command_text =
+            command != nullptr ? il2cpp::to_utf8(command, 640) : std::string();
+        const std::string id_text =
+            command_id != nullptr ? il2cpp::to_utf8(command_id, 128) : std::string();
+        LOGI("23.1.3-lastcmd: #%d EXIT command=%p %s chars=%zu text='%s' "
+             "command_id=%p %s text='%s'",
+             call, command, class_name(command).c_str(), command_text.size(),
+             command_text.c_str(), command_id, class_name(command_id).c_str(),
+             id_text.c_str());
+        name_last_command_literals();
+    }
+}
+
+using LastCommandPump = void (*)(void*, const MethodInfo*);
+inline LastCommandPump g_last_command_pump = nullptr;
+inline std::atomic<int32_t> g_last_command_pump_calls;
+
+void last_command_pump(void* self, const MethodInfo* method) {
+    const int32_t call =
+        g_last_command_pump_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= kMaxReports) {
+        LOGI("23.1.3-lastcmd: command pump ENTER #%d self=%p", call, self);
+    }
+    if (g_last_command_pump != nullptr) {
+        g_last_command_pump(self, method);
+    }
+    if (call <= kMaxReports) {
+        LOGI("23.1.3-lastcmd: command pump EXIT #%d", call);
+    }
+}
+
+using LastCommandApply = void (*)(void*, void*, const MethodInfo*);
+inline LastCommandApply g_last_command_apply = nullptr;
+inline std::atomic<int32_t> g_last_command_apply_calls;
+
+void last_command_apply(void* self, void* command, const MethodInfo* method) {
+    const int32_t call =
+        g_last_command_apply_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= 16) {
+        LOGI("23.1.3-lastcmd: parsed command apply ENTER #%d self=%p command=%p %s count=%d",
+             call, self, command, class_name(command).c_str(), count_at_0x20(command));
+        report_head_entries(command);
+    }
+    if (g_last_command_apply != nullptr) {
+        g_last_command_apply(self, command, method);
+    }
+    if (call <= 16) {
+        LOGI("23.1.3-lastcmd: parsed command apply EXIT #%d", call);
+    }
+}
+
 } // namespace detail
 
 inline bool install_hooks() {
@@ -282,7 +392,16 @@ inline bool install_hooks() {
     armed += hook::install({"Progress", u8"丄丄丘不丛专丙丈丈", u8"丁丌丄七丘三丘丛丂", 1},
                            reinterpret_cast<void*>(&detail::code_reader),
                            reinterpret_cast<void**>(&detail::g_code_reader), false) ? 1 : 0;  // 0x17A8B40
-    LOGI("23.1.3-apply: boot progress applier trace armed on %d/3 entry point(s); "
+    armed += hook::install({"Progress", u8"东丝丂丄业丕且丙丑", u8"丝丏丛丈且丒丆丗丗", 3},
+                           reinterpret_cast<void*>(&detail::last_command_handler),
+                           reinterpret_cast<void**>(&detail::g_last_command_handler), false) ? 1 : 0;  // 0x1B43940
+    armed += hook::install({"Progress", u8"东丝丂丄业丕且丙丑", u8"一三与与丅且丟丝万", 0},
+                           reinterpret_cast<void*>(&detail::last_command_pump),
+                           reinterpret_cast<void**>(&detail::g_last_command_pump), false) ? 1 : 0;  // 0x1B43F30
+    armed += hook::install({"Progress", u8"东丝丂丄业丕且丙丑", u8"丄丐业丗丟下一下一", 1},
+                           reinterpret_cast<void*>(&detail::last_command_apply),
+                           reinterpret_cast<void**>(&detail::g_last_command_apply), false) ? 1 : 0;  // 0x1B417DC
+    LOGI("23.1.3-apply: boot progress/last-command trace armed on %d/6 entry point(s); "
          "passive passthrough", armed);
     return armed > 0;
 }

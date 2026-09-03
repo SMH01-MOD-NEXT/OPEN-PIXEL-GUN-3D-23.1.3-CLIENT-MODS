@@ -54,12 +54,11 @@ template <typename Fn> void** original_slot(Fn* fn) {
 }
 
 void log_snapshot(const char* point) {
-    const int offline = g_offline_get ? (g_offline_get(nullptr) ? 1 : 0) : -1;
-    const int pun = g_pun_offline_get ? (g_pun_offline_get(nullptr) ? 1 : 0) : -1;
-    // Do not invoke the compound OfflineMod predicate just for diagnostics;
-    // report its most recent stock result so tracing cannot initialize or
-    // advance unrelated account/auth services.
-    const int verdict = g_last_offline_verdict.load();
+    // Cached values come only from intercepted stock calls. Diagnostics must
+    // never invoke a managed getter merely to enrich a log line.
+    const int offline = g_last_offline.load(std::memory_order_relaxed);
+    const int pun = g_last_pun_offline.load(std::memory_order_relaxed);
+    const int verdict = g_last_offline_verdict.load(std::memory_order_relaxed);
     const uint32_t n = g_snapshot.fetch_add(1u) + 1u;
     LOGI("23.1.3-anomaly[#%u %s]: accountOffline=%d punOffline=%d "
          "offlineModVerdict=%d", n, point, offline, pun, verdict);
@@ -76,14 +75,10 @@ bool hook_offline_get(const MethodInfo* method) {
 }
 
 void hook_offline_set(bool value, const MethodInfo* method) {
-    const bool before = g_offline_get ? g_offline_get(nullptr) : false;
-    LOGW("23.1.3-anomaly: account offline setter requested=%d before=%d",
-         value ? 1 : 0, before ? 1 : 0);
+    const int observed = g_last_offline.load(std::memory_order_relaxed);
+    LOGW("23.1.3-anomaly: account offline setter requested=%d lastObserved=%d",
+         value ? 1 : 0, observed);
     if (g_offline_set) g_offline_set(value, method);
-    const bool after = g_offline_get ? g_offline_get(nullptr) : value;
-    g_last_offline.store(after ? 1 : 0);
-    LOGW("23.1.3-anomaly: account offline setter completed after=%d",
-         after ? 1 : 0);
 }
 
 bool hook_pun_offline_get(const MethodInfo* method) {
@@ -97,14 +92,10 @@ bool hook_pun_offline_get(const MethodInfo* method) {
 }
 
 void hook_pun_offline_set(bool value, const MethodInfo* method) {
-    const bool before = g_pun_offline_get ? g_pun_offline_get(nullptr) : false;
-    LOGW("23.1.3-anomaly: PUN offlineMode setter requested=%d before=%d",
-         value ? 1 : 0, before ? 1 : 0);
+    const int observed = g_last_pun_offline.load(std::memory_order_relaxed);
+    LOGW("23.1.3-anomaly: PUN offlineMode setter requested=%d lastObserved=%d",
+         value ? 1 : 0, observed);
     if (g_pun_offline_set) g_pun_offline_set(value, method);
-    const bool after = g_pun_offline_get ? g_pun_offline_get(nullptr) : value;
-    g_last_pun_offline.store(after ? 1 : 0);
-    LOGW("23.1.3-anomaly: PUN offlineMode setter completed after=%d",
-         after ? 1 : 0);
 }
 
 bool hook_offline_verdict(const MethodInfo* method) {

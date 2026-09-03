@@ -1,18 +1,10 @@
 #pragma once
 
-// Prepare the app-owned OBB directory through Android's storage framework
-// before the native OBB provisioner runs.
-//
-// Android 11+ intentionally rejects a raw mkdir/open under Android/obb even
-// when the path names the calling package. Context.getObbDir() delegates
-// directory creation to StorageManager/vold, which associates the directory
-// with the app UID. The existing native provisioner can then keep doing the
-// large, atomic extraction without Java byte arrays or an extra dex payload.
-//
-// This header is pulled in by config.h. Its priority-101 constructor runs
-// before main.cpp's default-priority constructor, which starts the extraction.
-// Several translation units include config.h; the inline atomics below make
-// the bootstrap execute exactly once.
+// Prepare the app-owned OBB directory through Context.getObbDir() before
+// native provisioning. Android/Realme storage policy may reject a directory
+// copied by another process even when its pathname is correct; this call makes
+// Android create/associate the package directory from inside the game UID.
+// Failed early attempts are retryable from JNI_OnLoad.
 
 #include <atomic>
 #include <cerrno>
@@ -34,7 +26,7 @@ namespace detail {
 
 constexpr size_t kPathCap = 640u;
 
-inline std::atomic<bool> g_attempted{false};
+inline std::atomic<bool> g_running{false};
 inline std::atomic<bool> g_ready{false};
 
 using GetCreatedJavaVMs = jint (*)(JavaVM**, jsize, jsize*);
@@ -290,29 +282,24 @@ inline bool prepare_with_vm(JavaVM* vm) {
 } // namespace detail
 
 inline bool prepare() {
-    if (detail::g_ready.load()) return true;
+    if (detail::g_ready.load(std::memory_order_acquire)) return true;
     bool expected = false;
-    if (!detail::g_attempted.compare_exchange_strong(expected, true)) {
-        return detail::g_ready.load();
+    if (!detail::g_running.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return detail::g_ready.load(std::memory_order_acquire);
     }
 
     JavaVM* vm = detail::find_created_vm();
+    bool ready = false;
     if (vm == nullptr) {
-        LOGW("obb: JNI invocation API is not visible during native loading; trying legacy "
-             "native storage paths");
-        return false;
+        LOGW("obb: JNI invocation API is not visible yet; framework OBB "
+             "preparation will be retried from JNI_OnLoad");
+    } else {
+        ready = detail::prepare_with_vm(vm);
     }
-    const bool ready = detail::prepare_with_vm(vm);
-    detail::g_ready.store(ready);
+    if (ready) detail::g_ready.store(true, std::memory_order_release);
+    detail::g_running.store(false, std::memory_order_release);
     return ready;
 }
 
 } // namespace obb_framework_dir
-
-// Android's VM and Application already exist when Unity asks Java to load its
-// native library. Run before main.cpp's default-priority constructor so
-// Context.getObbDir()/StorageManager can prepare the FUSE-owned package path
-// before obb_provisioner::provision() calls open().
-__attribute__((constructor(101))) static void opg3d_prepare_framework_obb_directory() {
-    (void)::obb_framework_dir::prepare();
-}

@@ -11,22 +11,10 @@
 #include "il2cpp.h"
 #include "log.h"
 
-// Photon/PUN compatibility for the supplied obfuscated PG3D 23.1.3 ARM64
-// build (libil2cpp.so SHA-256
-// f0a130c4e8d9487059eab4b0f08462f6aa7d057510cada0fd6fb3043c77deb5c).
-//
-// Obfuscated identifiers below were remapped independently from the 16.1.0
-// dump. The mapping uses the PUN 1.91 class layout, ordered method signatures,
-// stable ServerSettings fields/enums and the AArch64 direct-call graph. No
-// 16.1.0 ARM32 RVA, field offset or opcode is reused.
-//
-// This module changes only the connection route:
-//   * Switcher returns the configured Photon AppID;
-//   * ServerSettings is put on Photon Cloud / EU through its own UseCloud API;
-//   * PUN offlineMode is cleared immediately before ConnectUsingSettings;
-//   * FriendsController.Update is quarantined only while Photon is connecting
-//     or connected, preserving the old project's dead-backend guard.
-// Rooms, matchmaking, RPCs, callbacks and manual disconnects remain stock.
+// Photon/PUN transport compatibility for the supplied PG3D 23.1.3 ARM64
+// build. The backend supplies the PUN AppID; this module selects Photon Cloud
+// EU, clears stock offlineMode immediately before connect, and otherwise leaves
+// rooms, callbacks, social updates, matchmaking and disconnects to stock code.
 namespace photon_2313 {
 namespace detail {
 
@@ -48,7 +36,6 @@ using UseCloudRegionFn = void (*)(void* settings, ManagedString* app_id,
 using StaticGetIntFn = int32_t (*)(const MethodInfo* method);
 using StaticGetBoolFn = bool (*)(const MethodInfo* method);
 using StaticSetBoolFn = void (*)(bool value, const MethodInfo* method);
-using InstanceVoidFn = void (*)(void* self, const MethodInfo* method);
 
 inline constexpr const char* kPhotonNetworkClass =
     u8"丟丝专丄丑世丞世丒";
@@ -71,12 +58,10 @@ inline constexpr const char* kSelectAppIdMethod =
 
 inline constexpr int32_t kPhotonCloudHost = 1;
 inline constexpr int32_t kForcedRegionEu = 0;
-inline constexpr int32_t kDisconnectedState = 15;
 
 inline SelectAppIdFn g_select_app_id = nullptr;
 inline SetUpPhotonFn g_set_up_photon = nullptr;
 inline ConnectUsingSettingsFn g_connect_using_settings = nullptr;
-inline InstanceVoidFn g_friends_update = nullptr;
 
 inline void* g_photon_settings_field = nullptr;
 inline const MethodInfo* g_use_cloud_info = nullptr;
@@ -88,9 +73,7 @@ inline StaticGetBoolFn g_get_offline = nullptr;
 inline const MethodInfo* g_offline_set_info = nullptr;
 inline StaticSetBoolFn g_set_offline = nullptr;
 
-inline std::atomic<bool> g_connect_started{false};
 inline std::atomic<uint32_t> g_route_applies{0u};
-inline std::atomic<uint32_t> g_blocked_backend_ticks{0u};
 inline std::atomic<bool> g_empty_app_logged{false};
 
 uint32_t fnv1a(const char* text, size_t size) {
@@ -202,25 +185,17 @@ bool ensure_online_mode() {
     return true;
 }
 
-// The AppID is a server-side credential: the backend serves it sealed for this
-// player and backend_client_2313 opens it. PHOTON_APP_ID remains only as a
-// bench fallback for builds made without a server.
+// The AppID is issued by the backend and authenticated in backend_client_2313.
 std::string app_id_for(const char* point) {
-    std::string served = backend_client_2313::photon_app_id("pun");
-    if (!served.empty()) return served;
-    const std::string compiled(PHOTON_APP_ID);
-    if (!compiled.empty()) {
-        LOGW("23.1.3-photon[%s]: the backend served no AppID; falling back to "
-             "the one compiled into this build", point);
+    std::string served = backend_client_2313::photon_app_id();
+    if (served.empty() && !g_empty_app_logged.exchange(true)) {
+        LOGE("23.1.3-photon[%s]: the backend served no PUN AppID, or this "
+             "build could not authenticate its envelope", point);
     }
-    return compiled;
+    return served;
 }
 
 bool force_cloud(const char* point) {
-#ifdef PHOTON_MODE_SELFHOSTED
-    (void)point;
-    return true;
-#else
     const std::string app = app_id_for(point);
     const size_t app_length = app.size();
     if (app_length == 0u) {
@@ -288,7 +263,6 @@ bool force_cloud(const char* point) {
              point);
     }
     return ready;
-#endif
 }
 
 ManagedString* hook_select_app_id(void* hidden_settings,
@@ -320,7 +294,6 @@ void hook_set_up_photon(void* hidden_settings, const MethodInfo* method) {
 
 bool hook_connect_using_settings(ManagedString* game_version,
                                  const MethodInfo* method) {
-    g_connect_started.store(true, std::memory_order_release);
     const bool online_mode = ensure_online_mode();
     const bool route = force_cloud("PUN.ConnectUsingSettings");
     LOGI("23.1.3-photon: ConnectUsingSettings begin state=%d "
@@ -331,22 +304,6 @@ bool hook_connect_using_settings(ManagedString* game_version,
     LOGI("23.1.3-photon: ConnectUsingSettings returned %d state=%d",
          result ? 1 : 0, connection_state());
     return result;
-}
-
-void hook_friends_update(void* self, const MethodInfo* method) {
-    if (g_connect_started.load(std::memory_order_acquire)) {
-        const int32_t state = connection_state();
-        if (state >= 2 && state != kDisconnectedState) {
-            const uint32_t count = g_blocked_backend_ticks.fetch_add(1u) + 1u;
-            if (count <= 8u || count % 120u == 0u) {
-                LOGW("23.1.3-photon: skipped FriendsController.Update #%" PRIu32
-                     " state=%d; retired social/backend tick cannot disconnect "
-                     "PUN", count, state);
-            }
-            return;
-        }
-    }
-    if (g_friends_update != nullptr) g_friends_update(self, method);
 }
 
 template <typename Fn>
@@ -390,29 +347,20 @@ inline bool install_hooks() {
         detail::original_slot(&detail::g_connect_using_settings), true);
     if (connect) ++installed;
 
-    const bool backend_guard = hook::install(
-        {"", "FriendsController", "Update", 0},
-        detail::replacement(&detail::hook_friends_update),
-        detail::original_slot(&detail::g_friends_update), true);
-    if (backend_guard) ++installed;
-
     (void)detail::install_optional(
         {"", "Switcher", detail::kSetUpPhotonMethod, 1},
         detail::replacement(&detail::hook_set_up_photon),
         detail::original_slot(&detail::g_set_up_photon), &installed);
 
-    LOGI("23.1.3-photon: installed %d hooks "
-         "(appid=%s connect=%s backend-guard=%s; mapped from independent "
-         "23.1.3 metadata and A64 call graph)",
-         installed, app_id ? "OK" : "FAILED",
-         connect ? "OK" : "FAILED",
-         backend_guard ? "OK" : "FAILED");
+    LOGI("23.1.3-photon: installed %d route hook(s) "
+         "(appid=%s connect=%s)", installed,
+         app_id ? "OK" : "FAILED", connect ? "OK" : "FAILED");
     if (std::strlen(OPG3D_APPID_KEY) == 0u) {
         LOGW("23.1.3-photon: this build carries no OPG3D_APPID_KEY, so a sealed "
              "AppID from the backend cannot be opened; the online route stays a "
              "diagnostic passthrough");
     }
-    return app_id && connect && backend_guard;
+    return app_id && connect;
 }
 
 } // namespace photon_2313

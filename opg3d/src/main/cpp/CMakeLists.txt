@@ -7,19 +7,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static libshadowhook is linked into the SHARED libopg3d.so -> PIC is required.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Configuration comes from Gradle. The AppID is a credential and is never
-# stored in the repository.
-set(PHOTON_APP_ID "" CACHE STRING "Photon Cloud AppID (CI secret / local -P)")
-set(PHOTON_MODE "cloud" CACHE STRING "cloud | selfhosted")
-set(PHOTON_SERVER_ADDRESS "" CACHE STRING "Optional fixed/self-hosted address")
-set(PHOTON_SERVER_PORT "5055" CACHE STRING "Optional fixed/self-hosted port")
-set(SHADOWHOOK_TAG "v2.0.1" CACHE STRING "ShadowHook version (git tag bytedance/android-inline-hook)")
-
-# Thin-client configuration. OPG3D_APPID_KEY must equal the backend's
-# OPG3D_APPID_KEY: it is what opens the sealed Photon AppID envelope. It is a
-# credential and is never stored in the repository.
-set(OPG3D_APPID_KEY "" CACHE STRING "Shared key that unseals Photon AppIDs (CI secret / local -P)")
-set(OPG3D_DEFAULT_SERVER "" CACHE STRING "Optional fallback backend host[:port] when discovery finds none")
+# Backend/client build configuration. The PUN AppID is intentionally absent:
+# it is supplied at runtime by OPEN-PIXEL-GUN-3D-BACKEND.
+set(SHADOWHOOK_TAG "v2.0.1" CACHE STRING "ShadowHook version")
+set(OPG3D_APPID_KEY "" CACHE STRING "Key authenticating backend PUN envelopes")
+set(OPG3D_DEFAULT_SERVER "" CACHE STRING "Optional fallback backend host[:port]")
+set(OPG3D_DIAGNOSTICS "0" CACHE STRING "Build observational diagnostics (0 or 1)")
 
 # --- ShadowHook (bytedance): sources + our patches ----------------------------
 # ShadowHook is the ARM inline-hook engine. IL2CPP symbol resolution is done
@@ -31,10 +24,7 @@ set(OPG3D_DEFAULT_SERVER "" CACHE STRING "Optional fallback backend host[:port] 
 # prefab/AAR:
 #   1) prefab pulls in separate libshadowhook.so + libshadowhook_nothing.so
 #      and breaks the "one .so in the artifact" requirement;
-#   2) on 32-bit armeabi-v7a the official bytesig installs a SIGSEGV handler
-#      with the SA_EXPOSE_TAGBITS flag, which the kernel rejects (EINVAL) —
-#      that's why shadowhook_init() used to fail with error 8 (INIT_SIGSEGV);
-#   3) their target builds with -Weverything -Werror and breaks on newer Clang.
+#   2) upstream warning policy is not stable across newer NDK/Clang releases.
 #
 # The price for "one .so" is two upstream patches, both in
 # cmake/patch-shadowhook.cmake:
@@ -68,13 +58,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(android_inline_hook)
 
-if(ANDROID_ABI STREQUAL "armeabi-v7a")
-    set(SH_ARCH "arm")
-elseif(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(SH_ARCH "arm64")
-else()
-    message(FATAL_ERROR "Unsupported ABI for shadowhook: ${ANDROID_ABI}")
+if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    message(FATAL_ERROR "PG3D 23.1.3 thin client supports arm64-v8a only")
 endif()
+set(SH_ARCH "arm64")
 
 set(SH_SRC_DIR ${android_inline_hook_SOURCE_DIR}/shadowhook/src/main/cpp)
 file(GLOB SH_SRC
@@ -88,19 +75,6 @@ add_library(shadowhook_static STATIC ${SH_SRC})
 target_compile_features(shadowhook_static PRIVATE c_std_11)
 # Third-party code: silence warnings and optimize for size.
 target_compile_options(shadowhook_static PRIVATE -Os -w)
-# ShadowHook normally overwrites one A32 instruction and jumps through an
-# 8-byte island allocated within the target's +/-32 MiB branch range. The
-# 14.1.1 libil2cpp mapping has no usable island near three PhotonNetwork
-# methods, so the first strategy returns errno 40. Enable ShadowHook's own
-# second strategy for this verified ARM32 target: after an island allocation
-# failure it rewrites the first two regular A32 prologue instructions with an
-# 8-byte absolute jump. The island strategy remains the first choice for all
-# other hooks.
-if(ANDROID_ABI STREQUAL "armeabi-v7a")
-    target_compile_definitions(shadowhook_static PRIVATE
-        SH_CONFIG_TRY_HOOK_WITHOUT_ISLAND=1
-    )
-endif()
 target_include_directories(shadowhook_static
     PUBLIC  ${SH_SRC_DIR}/include
     PRIVATE ${SH_SRC_DIR}
@@ -175,15 +149,10 @@ target_link_options(opg3d PRIVATE
 )
 
 target_compile_definitions(opg3d PRIVATE
-    PHOTON_APP_ID="${PHOTON_APP_ID}"
-    PHOTON_SERVER_ADDRESS="${PHOTON_SERVER_ADDRESS}"
-    PHOTON_SERVER_PORT=${PHOTON_SERVER_PORT}
     OPG3D_APPID_KEY="${OPG3D_APPID_KEY}"
     OPG3D_DEFAULT_SERVER="${OPG3D_DEFAULT_SERVER}"
+    OPG3D_DIAGNOSTICS=${OPG3D_DIAGNOSTICS}
 )
-if(PHOTON_MODE STREQUAL "selfhosted")
-    target_compile_definitions(opg3d PRIVATE PHOTON_MODE_SELFHOSTED=1)
-endif()
 
 # z: obb_provisioner.h reads the APK as a plain ZIP with syscalls, and both
 # things it needs from zlib are unavoidable there — AndroidManifest.xml is

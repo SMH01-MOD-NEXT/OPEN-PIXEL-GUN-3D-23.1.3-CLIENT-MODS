@@ -1,14 +1,11 @@
 #pragma once
 
 #include <atomic>
-#include <cerrno>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 
-#include <fcntl.h>
-#include <unistd.h>
 
 #include "hook.h"
 #include "il2cpp.h"
@@ -41,12 +38,8 @@
 // the only ground truth left. Reading it here is what lets the backend author a
 // document the client will parse.
 //
-// Cost control. The client accepts 153 documents per boot, so the per-call line
-// is one compact record. The body is written to disk for ConfigId 7 alone,
-// because logcat would truncate it and truncation destroys exactly the evidence
-// being collected.
-//
-// Nothing is altered: stock code runs with the arguments it was called with.
+// Cost control. Each call emits bounded text/byte previews only. No diagnostic
+// file is created and stock code runs once with the original arguments.
 namespace config_ingest_trace_2313 {
 namespace detail {
 
@@ -61,9 +54,6 @@ constexpr const char* kBalanceClass = "BalanceController";
 // Spelled as UTF-8 bytes so this file's source encoding cannot change which
 // method is resolved.
 constexpr const char* kAccept = u8"世丄丅丏丌专上世丄";
-
-// ConfigId.CommandsWithFullSlots, from the enum at dump2313.cs:449054.
-constexpr int32_t kCommandsWithFullSlots = 7;
 
 // Three further points on the same controller, added after run 26 proved the
 // subscribe answer is not the ingestion channel.
@@ -119,7 +109,6 @@ inline std::atomic<uint32_t> g_requests{0u};
 inline std::atomic<uint32_t> g_answers{0u};
 inline std::atomic<uint32_t> g_gates{0u};
 inline std::atomic<uint32_t> g_calls{0u};
-inline std::atomic<uint32_t> g_dumps{0u};
 
 template <typename T>
 inline T read_at(void* base, size_t offset, T fallback) {
@@ -181,79 +170,26 @@ inline const char* source_name(int32_t source) {
     }
 }
 
-// Writes the body into the app's own external files directory, next to the
-// client's binary config cache, so it can be pulled with adb and analysed
-// whole instead of through a truncated log line.
-inline void dump_to_file(int32_t config_id, uint32_t ordinal,
-                         const uint8_t* data, size_t length) {
-    char path[192];
-    std::snprintf(path, sizeof(path),
-                  "/storage/emulated/0/Android/data/com.pixel.gun3d/files/"
-                  "opg3d-config-%d-%u.bin",
-                  config_id, ordinal);
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        LOGW("23.1.3-cfgtrace: cannot write %s (errno=%d)", path, errno);
-        return;
-    }
-    size_t written = 0u;
-    while (written < length) {
-        const ssize_t chunk = ::write(fd, data + written, length - written);
-        if (chunk <= 0) break;
-        written += static_cast<size_t>(chunk);
-    }
-    ::close(fd);
-    LOGW("23.1.3-cfgtrace: body saved %zu/%zu byte(s) -> %s", written, length,
-         path);
-}
-
-// Saves the document text under its ConfigId so the exact shape the client
-// accepts can be read off the device instead of guessed from error strings.
-inline void dump_text_to_file(int32_t config_id, const std::string& text) {
-    char path[192];
-    std::snprintf(path, sizeof(path),
-                  "/storage/emulated/0/Android/data/com.pixel.gun3d/files/"
-                  "opg3d-doc-%d.json",
-                  config_id);
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        LOGW("23.1.3-cfgtrace: cannot write %s (errno=%d)", path, errno);
-        return;
-    }
-    size_t written = 0u;
-    while (written < text.size()) {
-        const ssize_t chunk =
-            ::write(fd, text.data() + written, text.size() - written);
-        if (chunk <= 0) break;
-        written += static_cast<size_t>(chunk);
-    }
-    ::close(fd);
-    LOGI("23.1.3-cfgtrace: document saved %zu/%zu char(s) -> %s", written,
-         text.size(), path);
-}
-
 void hook_accept(void* self, void* document, void* payload, int32_t source,
                  int32_t config_id, const MethodInfo* method) {
-    const uint32_t n = detail::g_calls.fetch_add(1u) + 1u;
-    const std::string text = il2cpp::to_utf8(document, 4u * 1024u * 1024u);
+    const uint32_t n = g_calls.fetch_add(1u) + 1u;
+    const int32_t chars =
+        document != nullptr && il2cpp::string_length != nullptr
+            ? il2cpp::string_length(document)
+            : -1;
+    const std::string head = il2cpp::to_utf8(document, kTextPreview);
     const int64_t length = array_length(payload);
     const uint8_t* data = array_data(payload);
 
-    LOGI("23.1.3-cfgtrace: #%u accept id=%d source=%s chars=%zu bytes=%" PRId64
+    LOGI("23.1.3-cfgtrace: #%u accept id=%d source=%s chars=%d bytes=%" PRId64
          " head='%s'",
-         n, config_id, source_name(source), text.size(), length,
-         text.substr(0u, kTextPreview).c_str());
+         n, config_id, source_name(source), chars, length, head.c_str());
 
-    if (!text.empty()) {
-        dump_text_to_file(config_id, text);
-    }
     if (length > 0 && data != nullptr) {
         const size_t size = static_cast<size_t>(length);
-        LOGW("23.1.3-cfgtrace: id=%d sealed body hex=%s", config_id,
-             bytes_to_hex(data, size, kHexPreview).c_str());
-        LOGW("23.1.3-cfgtrace: id=%d sealed body text='%s'", config_id,
+        LOGI("23.1.3-cfgtrace: id=%d sealed body hex=%s text='%s'", config_id,
+             bytes_to_hex(data, size, kHexPreview).c_str(),
              bytes_to_text(data, size, kTextPreview).c_str());
-        dump_to_file(config_id, detail::g_dumps.fetch_add(1u) + 1u, data, size);
     }
 
     if (g_accept != nullptr) {
@@ -371,8 +307,7 @@ inline bool install_hooks() {
         reinterpret_cast<void*>(&detail::hook_accept),
         reinterpret_cast<void**>(&detail::g_accept), true);
     LOGI("23.1.3-cfgtrace: config ingestion trace %s "
-         "(BalanceController document accept, 4 args); passive passthrough, "
-         "ConfigId 7 body saved to the app files directory",
+         "(BalanceController document accept, 4 args); bounded passive preview",
          armed ? "armed" : "refused");
     const bool request_armed = hook::install(
         {"", detail::kBalanceClass, detail::kRequest, 1},

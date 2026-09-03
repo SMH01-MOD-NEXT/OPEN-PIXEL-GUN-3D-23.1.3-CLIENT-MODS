@@ -5,8 +5,8 @@
 //
 // Nothing is emulated in-process any more. This module finds the self-hosted
 // Open Pixel Gun 3D backend, registers the device with it, and keeps the
-// session, the sealed Photon credentials and the update descriptor that the
-// rest of the port needs. Everything else (accounts, bans, config,
+// session and the sealed PUN credential that the rest of the port needs.
+// Everything else (accounts, bans, config,
 // progression, telemetry) belongs to the server.
 //
 // How the server is chosen, in order:
@@ -95,11 +95,8 @@ inline std::string g_device_id;
 inline std::string g_player_id;
 inline std::string g_session;
 inline std::string g_appid_pun;
-inline std::string g_appid_realtime;
 inline std::string g_source = "none";
 inline bool g_started = false;
-inline bool g_registered = false;
-inline bool g_banned = false;
 inline uint64_t g_requests = 0u;
 
 struct Guard {
@@ -693,10 +690,6 @@ inline bool handle_ban(const Response& response) {
     (void)json_string(response.body, "reason", &reason);
     (void)json_string(response.body, "until", &until);
     (void)json_string(response.body, "kind", &kind);
-    {
-        Guard guard;
-        g_banned = true;
-    }
     LOGE("23.1.3-client: the server refused this device: banned kind=%s "
          "reason=%s until=%s",
          kind.c_str(), reason.empty() ? "<none>" : reason.c_str(),
@@ -736,9 +729,7 @@ inline bool register_device() {
         Guard guard;
         g_player_id = player;
         g_session = session;
-        g_registered = true;
     }
-    (void)write_text_file(g_dir + "/session.txt", player + "\n" + session + "\n");
     LOGI("23.1.3-client: signed in as player_id=%s nick=%s session=%s",
          player.c_str(), nick.empty() ? "<unset>" : nick.c_str(),
          masked(session).c_str());
@@ -831,38 +822,6 @@ inline bool fetch_app_id(const char* mode, std::string* out) {
     return true;
 }
 
-// -------------------------------------------------------------- update feed
-
-inline void check_update() {
-    const Response response =
-        request("GET", std::string(kApiPrefix) + "/update", std::string(),
-                nullptr, true);
-    if (!response.transport_ok || response.status != 200) return;
-
-    std::string version;
-    std::string url;
-    std::string sha;
-    std::string notes;
-    bool mandatory = false;
-    (void)json_string(response.body, "version", &version);
-    (void)json_string(response.body, "apk_url", &url);
-    (void)json_string(response.body, "sha256", &sha);
-    (void)json_string(response.body, "notes_url", &notes);
-    (void)json_bool(response.body, "mandatory", &mandatory);
-
-    if (version.empty() && url.empty()) {
-        LOGI("23.1.3-client: the server publishes no client update right now");
-        return;
-    }
-    (void)write_text_file(g_dir + "/update.json", response.body);
-    LOGI("23.1.3-client: update available version=%s mandatory=%d url=%s "
-         "sha256=%s notes=%s (cached in %s/update.json for the in-game prompt)",
-         version.empty() ? "<unset>" : version.c_str(), mandatory ? 1 : 0,
-         url.empty() ? "<unset>" : url.c_str(),
-         sha.empty() ? "<unset>" : sha.c_str(),
-         notes.empty() ? "<unset>" : notes.c_str(), g_dir.c_str());
-}
-
 // ------------------------------------------------------------------ startup
 
 inline void handshake() {
@@ -888,19 +847,11 @@ inline void handshake() {
     }
 
     if (!register_device()) return;
-    check_update();
-
     std::string pun;
     if (fetch_app_id("pun", &pun)) {
         Guard guard;
         g_appid_pun = pun;
     }
-    std::string realtime;
-    if (fetch_app_id("realtime", &realtime)) {
-        Guard guard;
-        g_appid_realtime = realtime;
-    }
-
     pthread_cond_broadcast(&g_ready_signal);
 }
 
@@ -989,16 +940,6 @@ inline bool wait_for_server(int timeout_ms) {
     return false;
 }
 
-inline bool signed_in() {
-    detail::Guard guard;
-    return detail::g_registered;
-}
-
-inline bool banned() {
-    detail::Guard guard;
-    return detail::g_banned;
-}
-
 inline std::string player_id() {
     detail::Guard guard;
     return detail::g_player_id;
@@ -1012,38 +953,21 @@ inline std::string session() {
 // Blocks up to `timeout_ms` for the handshake, then hands back whatever the
 // server issued. Photon's connect path calls this, and waiting there is safe:
 // it already runs off a coroutine that tolerates a slow first frame.
-inline std::string photon_app_id(const char* mode, int timeout_ms = 8000) {
-    const bool realtime = mode != nullptr && std::strcmp(mode, "realtime") == 0;
+inline std::string photon_app_id(int timeout_ms = 8000) {
     const uint64_t deadline = opg3d_log::monotonic_ms() +
                               static_cast<uint64_t>(timeout_ms > 0 ? timeout_ms : 0);
     for (;;) {
         {
             detail::Guard guard;
-            const std::string& value =
-                realtime ? detail::g_appid_realtime : detail::g_appid_pun;
-            if (!value.empty()) return value;
+            if (!detail::g_appid_pun.empty()) return detail::g_appid_pun;
         }
         if (opg3d_log::monotonic_ms() >= deadline) break;
         usleep(50u * 1000u);
     }
-    LOGW("23.1.3-client: the %s AppID was still not available after %dms",
-         realtime ? "realtime" : "pun", timeout_ms);
+    LOGW("23.1.3-client: the PUN AppID was still not available after %dms",
+         timeout_ms);
     return std::string();
 }
 
-// Forwards a native-side failure to the server's /problem sink, so a crash
-// report survives even when the device's log has already rolled over.
-inline void report_problem(const char* stage, const char* text) {
-    if (!has_server()) return;
-    std::string body = "{\"stage\":\"";
-    body += detail::json_escape(stage != nullptr ? stage : "native");
-    body += "\",\"text\":\"";
-    body += detail::json_escape(text != nullptr ? text : "");
-    body += "\",\"build\":\"";
-    body += detail::json_escape(OPG3D_BUILD_STAMP);
-    body += "\"}";
-    (void)detail::request("POST", std::string(detail::kApiPrefix) + "/problem",
-                          body, "application/json", true);
-}
 
 } // namespace backend_client_2313

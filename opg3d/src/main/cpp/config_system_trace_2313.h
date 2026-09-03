@@ -1,16 +1,10 @@
 #pragma once
 
 #include <atomic>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <mutex>
 #include <string>
-#include <unordered_set>
 
-#include <fcntl.h>
-#include <unistd.h>
 
 #include "elf_sym.h"
 #include "hook.h"
@@ -144,10 +138,7 @@ constexpr size_t kArrayLength = 0x18u;
 
 constexpr size_t kTextPreview = 160u;
 
-// A manifest does not fit in a log line, so the whole document is written to a
-// file once per id. Temporary: it exists to recover the exact documents this
-// server has to host, and comes out once they are hosted.
-constexpr size_t kDocumentDumpLimit = 1u << 20;
+// All text observations are bounded to kTextPreview.
 constexpr uint32_t kVerboseCalls = 24u;
 
 using ParseFn = void (*)(void*, void*, void*, void*, const MethodInfo*);
@@ -625,54 +616,20 @@ inline bool hook_try_get_value(void* dictionary, void* key, void** out_value,
     return hit;
 }
 
-// Both read hooks call the original first and report what it returned, so a
-// consumer that logs a null config can be matched to the exact id it asked for
-// and to whether the storage answered with our document or with nothing.
-// Saves a document whole, once per id, in the app's own external files
-// directory, so the text the client reads can be compared with what this
-// server hosts instead of being guessed from a truncated preview.
-inline void dump_document_once(int32_t id, void* text_object) {
-    static std::mutex mutex;
-    static std::unordered_set<int32_t> dumped;
-    {
-        const std::lock_guard<std::mutex> guard(mutex);
-        if (!dumped.insert(id).second) return;
-    }
-    const std::string text = il2cpp::to_utf8(text_object, kDocumentDumpLimit);
-    if (text.empty()) return;
-    char path[192];
-    std::snprintf(path, sizeof(path),
-                  "/storage/emulated/0/Android/data/com.pixel.gun3d/files/"
-                  "opg3d-doc-%d.json",
-                  id);
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        LOGW("23.1.3-cfgsys: cannot write %s (errno=%d)", path, errno);
-        return;
-    }
-    size_t written = 0u;
-    while (written < text.size()) {
-        const ssize_t chunk =
-            ::write(fd, text.data() + written, text.size() - written);
-        if (chunk <= 0) break;
-        written += static_cast<size_t>(chunk);
-    }
-    ::close(fd);
-    LOGI("23.1.3-cfgsys: document %d saved %zu/%zu char(s) -> %s", id, written,
-         text.size(), path);
-}
-
+// Read hooks call the original first and report only a bounded preview.
 inline void* hook_get_text(void* self, int32_t id, const MethodInfo* method) {
     void* result = nullptr;
     if (g_get_text != nullptr) {
         result = g_get_text(self, id, method);
     }
     const uint32_t call = g_get_text_calls.fetch_add(1u) + 1u;
-    if (result != nullptr) dump_document_once(id, result);
+    const int32_t chars =
+        result != nullptr && il2cpp::string_length != nullptr
+            ? il2cpp::string_length(result)
+            : -1;
     const std::string head = text_of(result);
     LOGI("23.1.3-cfgsys: #%u get-text id=%d null=%d chars=%d head='%s'", call,
-         id, result == nullptr ? 1 : 0, static_cast<int>(head.size()),
-         head.c_str());
+         id, result == nullptr ? 1 : 0, chars, head.c_str());
     return result;
 }
 

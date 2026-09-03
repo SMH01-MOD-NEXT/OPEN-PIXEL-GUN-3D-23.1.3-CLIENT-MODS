@@ -2,19 +2,12 @@ plugins {
     id 'com.android.library'
 }
 
-// Config arrives as gradle properties (NOT via gradle.properties — that file
-// is committed to git):
-//   CI:    env ORG_GRADLE_PROJECT_PHOTON_APP_ID=... (GitHub Secrets)
-//   Local: gradle :opg3d:assembleRelease -PPHOTON_APP_ID=... etc.
-def photonAppId = providers.gradleProperty('PHOTON_APP_ID').orElse('').get()
-def photonMode = providers.gradleProperty('PHOTON_MODE').orElse('cloud').get()
-def photonAddr = providers.gradleProperty('PHOTON_SERVER_ADDRESS').orElse('').get()
-def photonPort = providers.gradleProperty('PHOTON_SERVER_PORT').orElse('5055').get()
-// Thin-client secrets: the key that unseals the Photon AppID the backend
-// serves, and an optional fallback server address for builds shipped to
-// players who cannot use LAN discovery.
+// Build configuration arrives as Gradle properties. The PUN AppID itself is
+// never compiled in; the backend supplies it in an authenticated envelope.
 def appIdKey = providers.gradleProperty('OPG3D_APPID_KEY').orElse('').get()
 def defaultServer = providers.gradleProperty('OPG3D_DEFAULT_SERVER').orElse('').get()
+def diagnostics = providers.gradleProperty('OPG3D_DIAGNOSTICS')
+        .orElse('false').get().toBoolean() ? '1' : '0'
 // CMake 4.1.2 is the version this port is built and verified with. GHA runners
 // ship 3.31.5 in the SDK image, so the workflow installs 4.1.2 through
 // sdkmanager before building. Override with -PCMAKE_VERSION=<installed> if a
@@ -32,12 +25,9 @@ android {
         externalNativeBuild {
             cmake {
                 targets 'opg3d'
-                arguments "-DPHOTON_APP_ID=${photonAppId}".toString(),
-                        "-DPHOTON_MODE=${photonMode}".toString(),
-                        "-DPHOTON_SERVER_ADDRESS=${photonAddr}".toString(),
-                        "-DPHOTON_SERVER_PORT=${photonPort}".toString(),
-                        "-DOPG3D_APPID_KEY=${appIdKey}".toString(),
-                        "-DOPG3D_DEFAULT_SERVER=${defaultServer}".toString()
+                arguments "-DOPG3D_APPID_KEY=${appIdKey}".toString(),
+                        "-DOPG3D_DEFAULT_SERVER=${defaultServer}".toString(),
+                        "-DOPG3D_DIAGNOSTICS=${diagnostics}".toString()
             }
         }
     }

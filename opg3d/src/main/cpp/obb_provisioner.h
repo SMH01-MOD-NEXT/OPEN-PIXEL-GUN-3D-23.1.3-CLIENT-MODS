@@ -88,8 +88,9 @@ constexpr uint32_t kZip32Sentinel = 0xffffffffu;
 constexpr uint16_t kMethodStore = 0u;
 constexpr uint16_t kMethodDeflate = 8u;
 
-// provision() has two entry points (see main.cpp) and must run exactly once.
-inline std::atomic<bool> g_started{false};
+// Early storage setup can fail before Application is ready, so unsuccessful
+// calls are retryable from JNI_OnLoad. A successful result remains idempotent.
+inline std::atomic<bool> g_running{false};
 inline std::atomic<bool> g_result{false};
 
 inline uint16_t le16(const uint8_t* data) {
@@ -162,16 +163,29 @@ inline const char* base_name_of(const char* path) {
 }
 
 // --- our own APK -----------------------------------------------------------
-//
-// A library loaded straight out of the APK is mapped as
-// "/data/app/~~a==/com.pixel.gun3d-b==/base.apk!/lib/armeabi-v7a/libX.so",
-// so the path is cut right after ".apk". base.apk wins over any split.
-inline bool find_own_apk(char* out, size_t capacity) {
+// Match the process package before accepting a mapped APK. On Android many
+// framework packages are mapped into the process; selecting the first
+// /base.apk can silently parse Google Play services instead of this game.
+inline bool apk_path_matches_package(const char* path, const char* package) {
+    if (path == nullptr || package == nullptr || package[0] == '\0') return false;
+    const size_t length = std::strlen(package);
+    const char* hit = path;
+    while ((hit = std::strstr(hit, package)) != nullptr) {
+        const bool left = hit == path || hit[-1] == '/';
+        const char tail = hit[length];
+        const bool right = tail == '-' || tail == '/' || tail == '.' || tail == '\0';
+        if (left && right) return true;
+        ++hit;
+    }
+    return false;
+}
+
+inline bool find_own_apk(const char* process_package, char* out,
+                         size_t capacity) {
     FILE* maps = std::fopen("/proc/self/maps", "re");
     if (maps == nullptr) return false;
 
-    char best[kPathCap];
-    best[0] = '\0';
+    char best[kPathCap] = {};
     char line[1024];
     while (std::fgets(line, sizeof(line), maps) != nullptr) {
         char* path = std::strchr(line, '/');
@@ -179,13 +193,28 @@ inline bool find_own_apk(char* out, size_t capacity) {
         char* marker = std::strstr(path, ".apk");
         if (marker == nullptr) continue;
         marker[4] = '\0';
+        if (!apk_path_matches_package(path, process_package)) continue;
 
         struct stat64 info {};
         if (stat64(path, &info) != 0 || !S_ISREG(info.st_mode)) continue;
 
-        const bool is_base = std::strstr(path, "/base.apk") != nullptr;
-        if (best[0] == '\0' || is_base) std::snprintf(best, sizeof(best), "%s", path);
-        if (is_base) break;
+        // A mapped split identifies the correct install directory too. Prefer
+        // its base.apk sibling, which owns the manifest and embedded payload.
+        char base[kPathCap] = {};
+        const char* slash = std::strrchr(path, '/');
+        if (slash != nullptr) {
+            const size_t prefix = static_cast<size_t>(slash - path);
+            if (prefix + sizeof("/base.apk") <= sizeof(base)) {
+                std::memcpy(base, path, prefix);
+                std::memcpy(base + prefix, "/base.apk", sizeof("/base.apk"));
+                struct stat64 base_info {};
+                if (stat64(base, &base_info) == 0 && S_ISREG(base_info.st_mode)) {
+                    std::snprintf(best, sizeof(best), "%s", base);
+                    break;
+                }
+            }
+        }
+        if (best[0] == '\0') std::snprintf(best, sizeof(best), "%s", path);
     }
     std::fclose(maps);
 
@@ -882,9 +911,17 @@ inline bool place_payload(int apk_fd, const ZipEntry& entry, const char* kind,
 }
 
 inline bool run() {
+    char process_name[kPackageCap] = {};
+    if (!read_process_name(process_name, sizeof(process_name))) {
+        LOGE("obb: package identity unavailable from /proc/self/cmdline; refusing "
+             "to inspect an arbitrary mapped APK");
+        return false;
+    }
+
     char apk[kPathCap];
-    if (!find_own_apk(apk, sizeof(apk))) {
-        LOGE("obb: own APK not found in /proc/self/maps; expansion provisioning skipped");
+    if (!find_own_apk(process_name, apk, sizeof(apk))) {
+        LOGE("obb: no APK mapped for process package '%s'; provisioning skipped",
+             process_name);
         return false;
     }
     const int fd = open(apk, O_RDONLY | O_CLOEXEC);
@@ -938,18 +975,13 @@ inline bool run() {
         LOGW("obb: the APK has no AndroidManifest.xml entry");
     }
 
-    char process_name[kPackageCap];
-    process_name[0] = '\0';
-    const bool have_process_name = read_process_name(process_name, sizeof(process_name));
-    if (package[0] == '\0' && have_process_name) {
-        std::snprintf(package, sizeof(package), "%s", process_name);
-        LOGW("obb: package name taken from /proc/self/cmdline ('%s')", package);
-    } else if (have_process_name && std::strcmp(package, process_name) != 0) {
-        LOGW("obb: manifest package '%s' differs from the process name '%s'; using the "
-             "manifest", package, process_name);
-    }
     if (package[0] == '\0') {
-        LOGE("obb: package name unknown; expansion provisioning aborted");
+        std::snprintf(package, sizeof(package), "%s", process_name);
+        LOGW("obb: manifest package unavailable; using verified process package '%s'",
+             package);
+    } else if (std::strcmp(package, process_name) != 0) {
+        LOGE("obb: refusing APK '%s': manifest package '%s' does not match "
+             "process package '%s'", apk, package, process_name);
         close(fd);
         return false;
     }
@@ -995,15 +1027,17 @@ inline bool run() {
 
 } // namespace detail
 
-// Idempotent. Safe to call from more than one entry point; the first call does
-// the work, later calls return its result.
+// Idempotent after success and retryable after an early storage failure.
 inline bool provision() {
+    if (detail::g_result.load(std::memory_order_acquire)) return true;
     bool expected = false;
-    if (!detail::g_started.compare_exchange_strong(expected, true)) {
-        return detail::g_result.load();
+    if (!detail::g_running.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return detail::g_result.load(std::memory_order_acquire);
     }
     const bool ok = detail::run();
-    detail::g_result.store(ok);
+    if (ok) detail::g_result.store(true, std::memory_order_release);
+    detail::g_running.store(false, std::memory_order_release);
     return ok;
 }
 
