@@ -17,6 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Test startup clock compatibility
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Itools/test_support \
+            tools/test_startup_clock.cpp -o /tmp/test-startup-clock -pthread -ldl
+          /tmp/test-startup-clock
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 

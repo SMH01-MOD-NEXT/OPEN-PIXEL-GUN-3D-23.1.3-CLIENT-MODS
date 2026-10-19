@@ -43,6 +43,7 @@
 #include "photon_trace_2313.h"
 #include "sio_codec_trace_2313.h"
 #include "startup_trace_2313.h"
+#include "startup_clock_2313.h"
 #include "ui_progress_trace_2313.h"
 #include "version_2313.h"
 #include "ws_redirect_2313.h"
@@ -213,6 +214,11 @@ void* init_thread(void*) {
         return nullptr;
     }
     LOGI("init: [6/6] Assembly-CSharp.dll ready; installing 23.1.3 hooks");
+
+    (void)install_component(
+        "startup", "Switcher loading clock",
+        true,
+        []() { return startup_clock_2313::install(); });
 
     (void)install_component(
         "diagnostics", "lifecycle trace",
