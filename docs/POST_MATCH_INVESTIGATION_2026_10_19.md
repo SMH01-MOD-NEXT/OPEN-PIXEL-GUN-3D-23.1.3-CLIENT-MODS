@@ -1,6 +1,6 @@
 # Post-match results investigation — 23.1.3
 
-Status: diagnosis in progress; no gameplay fix claimed.
+Status: confirmed backend Boosters delivery fix; rewards/player list restored.
 
 ## Current evidence, not historical assumptions
 
@@ -125,3 +125,52 @@ restores its frame and tail-branches to the stock null helper. Device startup
 confirms the null-site observer, managed capture, both frame observers and all
 22 driver hooks installed. A further completed match is pending; this is not a
 functional fix.
+
+
+## Third capture: missing Boosters JSON model
+
+Focused profile `bcd5f65e9807ac03a2ca95f8d53f195f3a815a956b62118dfbf824f9e82a48bc`,
+PID 29725: at device 14:30:28 the null helper records caller RVA 0x4851A60,
+call RVA 0x4851A5C. This is the common generated null branch of
+NetworkStartTableNGUIController reward preparation (0x4850494), not the outer
+iterator's table-animation wait.
+
+Read-only rooted memory confirms ConfigId 167's generic config wrapper exists,
+but its payload at +0x10 is null. Boosters' GameModes getter 0x366C0AC returns
+null in this case; reward preparation dereferences the list at 0x4850BE4 before
+calling Contains. The instance and GameController connection exist. A null
+GameConnect.currentEvent is valid for ordinary team fight and must NOT be
+repaired by inventing an event: the ordinary branch explicitly bypasses it.
+
+The generic Boosters config loader 0x26065A0 calls ConfigSystem.GetText
+(0x24981B0). Sending the JSON as a binary attachment populated the cache hash
+but not its text, so the model stayed null. Backend delivery is now selectively
+inline for Boosters only; other binary configs and all reward/economy logic
+remain unchanged. Host tests assert inline text, fingerprint, non-null bs/gm
+arrays, unchanged document and no expansion to unrelated config names.
+
+After restarting backend and app without changing app data or the installed
+frontend library, PID 2188 read-only memory shows a parsed Boosters model,
+non-null BoosterSettings and GameModes lists with count zero, and non-null
+MigrationSettings and BoosterEventSettings. Startup no longer logs Boosters
+_config == null (other incomplete services still do). A new match is running;
+complete result-screen and Continue verification remains pending.
+
+
+## Confirmed repair and real-match verification
+
+With ONLY backend selective Boosters inline delivery changed, PID 2188's next
+actual match completed normally. At device 14:44:39 the results iterator
+returned false at state -1 (not an unwound call), followed by normal reward
+queue/delay completion. OnRewardShow and OnRewardAnimationEnds subsequently
+fired; no scoped post-match null/exception was recorded. The user confirmed
+both rewards and the player list. A subsequent ADB screenshot shows the lobby
+with level 2, 30 XP and 28 coins. No automated Continue action was performed.
+
+Backend regression tests and full Go tests pass, including race tests for API
+and SIO. This repair changes no frontend gameplay code, reward amounts,
+GameModeEvents documents, coroutine scheduling, or panel visibility. Existing
+focused passive diagnostics remain installed to preserve continuity; default-off
+frontend artifacts were already built and tested separately. Other startup
+null-config warnings (TopUp, ConfrontationEvent, ManualOffers) remain outside
+this issue. Do not claim those services or all game modes are implemented.
