@@ -13,6 +13,7 @@ set(SHADOWHOOK_TAG "v2.0.1" CACHE STRING "ShadowHook version")
 set(OPG3D_APPID_KEY "" CACHE STRING "Key authenticating backend PUN envelopes")
 set(OPG3D_DEFAULT_SERVER "" CACHE STRING "Optional fallback backend host[:port]")
 set(OPG3D_DIAGNOSTICS "0" CACHE STRING "Build observational diagnostics (0 or 1)")
+set(OPG3D_POST_MATCH_TRACE "0" CACHE STRING "Build focused post-match trace (0 or 1)")
 
 # --- ShadowHook (bytedance): sources + our patches ----------------------------
 # ShadowHook is the ARM inline-hook engine. IL2CPP symbol resolution is done
@@ -152,6 +153,7 @@ target_compile_definitions(opg3d PRIVATE
     OPG3D_APPID_KEY="${OPG3D_APPID_KEY}"
     OPG3D_DEFAULT_SERVER="${OPG3D_DEFAULT_SERVER}"
     OPG3D_DIAGNOSTICS=${OPG3D_DIAGNOSTICS}
+    OPG3D_POST_MATCH_TRACE=${OPG3D_POST_MATCH_TRACE}
 )
 
 # z: obb_provisioner.h reads the APK as a plain ZIP with syscalls, and both

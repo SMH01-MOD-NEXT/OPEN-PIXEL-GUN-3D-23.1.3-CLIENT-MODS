@@ -23,3 +23,8 @@
 #endif
 
 #define OPG3D_BUILD_STAMP OPG3D_BUILD_TAG " built " __DATE__ " " __TIME__
+
+// Focused end-of-match profile, independent of noisy startup diagnostics.
+#ifndef OPG3D_POST_MATCH_TRACE
+#define OPG3D_POST_MATCH_TRACE 0
+#endif

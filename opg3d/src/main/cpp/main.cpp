@@ -10,6 +10,7 @@
 #include "backend_client_2313.h"
 #include "backend_redirect_2313.h"
 #include "config.h"
+#include "post_match_trace_2313.h"
 #include "config_ingest_trace_2313.h"
 #include "config_store_trace_2313.h"
 #include "debug_log_trace_2313.h"
@@ -313,6 +314,11 @@ void* init_thread(void*) {
         "diagnostics", "quiet authorization trace",
         feature_config::startup::quiet_auth_trace,
         []() { return quiet_auth_trace_2313::install_hooks(); });
+
+    (void)install_component(
+        "diagnostics", "post-match results trace",
+        OPG3D_POST_MATCH_TRACE != 0,
+        [base]() { return post_match_trace_2313::install_hooks(base); });
 
     const bool backend_redirect = install_component(
         "network", "backend redirect", feature_config::network::backend_redirect,

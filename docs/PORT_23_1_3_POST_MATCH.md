@@ -1,5 +1,11 @@
 # 23.1.3 — in-match micro-freezes and the dead end-of-match screen
 
+> Historical investigation: revisions 3–4 below are not verified fixes for the
+> current thin client. The 2026-10-19 passive capture proves the host remains
+> active and the results iterator resumes normally until a non-returning step.
+> See [current investigation](POST_MATCH_INVESTIGATION_2026_10_19.md). In
+> particular, `finishedInterface` is a GameObject, not a boolean state flag.
+
 Two defects reported on the private 23.1.3 build:
 
 1. Micro-freezes during play, most noticeable in combat.

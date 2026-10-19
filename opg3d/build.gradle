@@ -8,6 +8,8 @@ def appIdKey = providers.gradleProperty('OPG3D_APPID_KEY').orElse('').get()
 def defaultServer = providers.gradleProperty('OPG3D_DEFAULT_SERVER').orElse('').get()
 def diagnostics = providers.gradleProperty('OPG3D_DIAGNOSTICS')
         .orElse('false').get().toBoolean() ? '1' : '0'
+def postMatchTrace = providers.gradleProperty('OPG3D_POST_MATCH_TRACE')
+        .orElse('false').get().toBoolean() ? '1' : '0'
 // CMake 4.1.2 is the version this port is built and verified with. GHA runners
 // ship 3.31.5 in the SDK image, so the workflow installs 4.1.2 through
 // sdkmanager before building. Override with -PCMAKE_VERSION=<installed> if a
@@ -27,7 +29,8 @@ android {
                 targets 'opg3d'
                 arguments "-DOPG3D_APPID_KEY=${appIdKey}".toString(),
                         "-DOPG3D_DEFAULT_SERVER=${defaultServer}".toString(),
-                        "-DOPG3D_DIAGNOSTICS=${diagnostics}".toString()
+                        "-DOPG3D_DIAGNOSTICS=${diagnostics}".toString(),
+                        "-DOPG3D_POST_MATCH_TRACE=${postMatchTrace}".toString()
             }
         }
     }
