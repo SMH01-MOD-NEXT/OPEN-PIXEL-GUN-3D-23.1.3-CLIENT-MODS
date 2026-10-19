@@ -30,7 +30,8 @@ On the rooted device, process 25221:
 
 The important distinction is a non-returning iterator resume, consistent with
 managed exception unwinding, rather than an iterator abandoned at a yield. Its
-exact exception and failing method still require the next capture. The initial
+exact exception was identified by the second capture; the failing native method
+is still being localized. The initial
 trace did not log inside the runtime exception-raising path; Unity's ordinary
 log stream contained no corresponding match-end exception.
 
@@ -81,11 +82,46 @@ This is diagnostics, not a fix.
   a real completed match produced the evidence above.
 - Data and preferences preserved; backend and economy behavior unchanged.
 
-Complete another match with the second profile and leave the result screen
-visible for 15 seconds. Use `23.1.3-post-match-exception` lines to identify the
-real failing call. Do not revive an iterator that has unwound through an
+The second capture identified the exception below. Use the scoped null-site
+observer to identify the real failing call. Do not revive an iterator that has unwound through an
 exception, grant local rewards, or auto-press Continue.
 
 Continuous private capture is kept under `~/.cache/opg3d-recovery/`; raw logs and
 screenshots are not committed. Installed-library rollback is available in
 `/data/local/tmp/opg3d-before-post-match-trace.so` (known-good startup release).
+
+
+## Confirmed managed exception, second completed match
+
+Process 28219, 14:18:49.370 device time:
+
+```text
+scope=results MoveNext exception=System.NullReferenceException:
+Object reference not set to an instance of an object.
+```
+
+The exception follows OnTablesShow and the post-table resume. The formatted
+managed stack is empty in this binary, despite running stock CaptureStackTrace
+first. No native crash or inactive host was observed. Reward controller,
+mainReward and animator are present. Read-only inspection of the still-open
+result screen found exp 30 and coins 8 already copied into controller fields;
+the generated results code performs that copy after DisableRewards and the
+initial reward panel reset. This narrows the remaining failing section but does
+not establish a particular null field yet.
+
+A third focused profile adds a validated hook at the exact build's generated
+null-reference helper (0x1291fd8). It records only its immediate caller's relative
+address while a result/reward coroutine is executing. It does not attempt native
+unwinding, catch/suppress exceptions, restart iterators or modify client fields.
+The original raise helper is always called, including outside result scope.
+The save-LR instructions and both helper BL targets are checked before install.
+
+Installed third-profile SHA-256:
+`bcd5f65e9807ac03a2ca95f8d53f195f3a815a956b62118dfbf824f9e82a48bc`.
+Gradle check + release assembly pass for both focused and default-off profiles;
+host observer assertions, URL assertions and all four Python tests pass.
+Disassembly confirms caller LR is captured before logging, then the proxy
+restores its frame and tail-branches to the stock null helper. Device startup
+confirms the null-site observer, managed capture, both frame observers and all
+22 driver hooks installed. A further completed match is pending; this is not a
+functional fix.

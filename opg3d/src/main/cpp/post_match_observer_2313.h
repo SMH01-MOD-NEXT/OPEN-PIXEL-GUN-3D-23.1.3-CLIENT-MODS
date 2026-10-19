@@ -44,6 +44,21 @@ inline void (*format_exception)(void*, char*, int) = nullptr;
 inline void (*format_stack)(void*, char*, int) = nullptr;
 inline thread_local const char* result_scope = nullptr;
 inline thread_local bool formatting = false;
+using NullRaise = void (*)();
+inline NullRaise original_null_raise = nullptr;
+inline uintptr_t runtime_base = 0;
+// This build omits managed stack frames. Read only the immediate caller LR,
+// without attempting to unwind across IL2CPP's incompatible C++ runtime.
+__attribute__((noinline)) inline void null_raise() {
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(
+        __builtin_extract_return_addr(__builtin_return_address(0)));
+    if (result_scope && caller >= runtime_base && caller-runtime_base < 0x6800000) {
+        LOGE("23.1.3-post-match-null-site: scope=%s caller-rva=0x%llx call-rva=0x%llx",
+             result_scope, static_cast<unsigned long long>(caller-runtime_base),
+             static_cast<unsigned long long>(caller-runtime_base-4));
+    }
+    original_null_raise(); // Never suppress, replace or retry the stock throw.
+}
 inline void capture_exception(void* exception, const void* method) {
     original_capture(exception, method);
     if (!result_scope || formatting) return;
@@ -270,6 +285,21 @@ inline bool install_hooks(uintptr_t base) {
     format_exception = reinterpret_cast<void (*)(void*, char*, int)>(elfsym::find_symbol("libil2cpp.so", "il2cpp_format_exception"));
     format_stack = reinterpret_cast<void (*)(void*, char*, int)>(elfsym::find_symbol("libil2cpp.so", "il2cpp_format_stack_trace"));
     if (!format_exception || !format_stack) return false;
+    // Validate both instructions of this tiny non-returning null helper.
+    // The hook engine relocates a full 16-byte span, so validate the following
+    // helper too. It must not be installed against a different game binary.
+    const uint32_t saved_lr = 0xf81f0ffeu;
+    uint32_t actual[4]{};
+    std::memcpy(actual, reinterpret_cast<void*>(base + 0x1291fd8), sizeof(actual));
+    // Decode branches instead of relying on manually transcribed immediates.
+    const bool null_layout = actual[0] == saved_lr && actual[2] == saved_lr &&
+        branch_target(base + 0x1291fdc) == base + 0x12cd940 &&
+        branch_target(base + 0x1291fe4) == base + 0x12cd98c;
+    runtime_base = base;
+    bool null_site = null_layout && hook::install_address(
+        reinterpret_cast<void*>(base + 0x1291fd8), "23.1.3 null raise (validated instructions)",
+        reinterpret_cast<void*>(&null_raise), reinterpret_cast<void**>(&original_null_raise), false);
+    LOGI("23.1.3-post-match-null-site: scoped caller observer=%d", int(null_site));
     bool exceptions = hook::install_address(reinterpret_cast<void*>(base + 0x12cd660),
         "23.1.3 Exception::CaptureStackTrace (validated raise BL chain)",
         reinterpret_cast<void*>(&capture_exception), reinterpret_cast<void**>(&original_capture), false);
@@ -277,6 +307,6 @@ inline bool install_hooks(uintptr_t base) {
     bool b = hook::install({"", "NetworkStartTableNGUIController", "Update", 0}, reinterpret_cast<void*>(&controller_update), reinterpret_cast<void**>(&original_controller_update), false);
     LOGI("23.1.3-post-match-observe: passive heartbeat table=%d controller=%d UI=%d", int(a), int(b), int(bool(children)));
     LOGI("23.1.3-post-match-exception: scoped managed stack observer=%d", int(exceptions));
-    return exceptions && a && b;
+    return null_site && exceptions && a && b;
 }
 } // namespace post_match_observer_2313

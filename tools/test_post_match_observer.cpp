@@ -31,7 +31,8 @@ uint32_t create(void* object, bool pinned) {
 void* target(uint32_t handle) { return handles.at(handle); }
 void drop(uint32_t handle) { assert(handles.erase(handle) == 1); ++frees; }
 void update(void*, const void*) { ++updates; }
-int captures = 0, formats = 0;
+int captures = 0, formats = 0, null_raises = 0;
+void stock_null() { ++null_raises; }
 void capture(void*, const void*) { ++captures; }
 void format(void*, char* output, int capacity) {
     assert(capacity > 40);
@@ -74,6 +75,12 @@ int main() {
     table_update(nullptr, nullptr);
     controller_update(nullptr, nullptr);
     assert(updates == 2); // Always preserve both original frame callbacks.
+    original_null_raise = stock_null;
+    null_raise();
+    result_scope = "test results null";
+    null_raise();
+    assert(null_raises == 2 && result_scope); // Stock throw remains the only action.
+    result_scope = nullptr;
     original_capture = capture;
     format_exception = format;
     format_stack = format;
