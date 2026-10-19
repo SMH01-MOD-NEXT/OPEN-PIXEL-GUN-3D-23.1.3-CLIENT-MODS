@@ -49,6 +49,7 @@
 #include "hook.h"
 #include "il2cpp.h"
 #include "log.h"
+#include "url_diagnostics_2313.h"
 
 namespace backend_redirect_2313 {
 namespace detail {
@@ -194,7 +195,7 @@ inline bool rewrite_url(const std::string& url, std::string* out) {
         if (should_log(g_no_server)) {
             LOGE("23.1.3-redirect: %s was requested but no backend is selected "
                  "yet, so it goes to the retired service and will fail "
-                 "(#%" PRIu64 ")", url.c_str(), g_no_server);
+                 "(#%" PRIu64 ")", url_diagnostics_2313::redact(url).c_str(), g_no_server);
         }
         return false;
     }
@@ -245,7 +246,7 @@ inline void* redirect(void* candidate, const char* surface) {
         ++g_passthrough;
         if (should_log(g_passthrough)) {
             LOGI("23.1.3-redirect: %s left untouched (#%" PRIu64 "): %s", surface,
-                 g_passthrough, url.c_str());
+                 g_passthrough, url_diagnostics_2313::redact(url).c_str());
         }
         return nullptr;
     }
@@ -256,8 +257,8 @@ inline void* redirect(void* candidate, const char* surface) {
     ++g_rewrites;
     if (should_log(g_rewrites)) {
         LOGI("23.1.3-redirect: %s (#%" PRIu64 ")\n  game asked for: %s\n  sent "
-             "instead to: %s", surface, g_rewrites, url.c_str(),
-             rewritten.c_str());
+             "instead to: %s", surface, g_rewrites, url_diagnostics_2313::redact(url).c_str(),
+             url_diagnostics_2313::redact(rewritten).c_str());
     }
     return managed;
 }
@@ -326,9 +327,63 @@ inline void www_ctor3_hook(void* self, void* url, void* data, void* headers,
     }
 }
 
+// BestHTTP is independent of UnityWebRequest/WWW. In particular auth_v2
+// uses this transport, so leaving it untouched retains a vendor dependency.
+// Resolve the unambiguous accessors once and use the managed setter (GC barrier),
+// never write a guessed object offset. Send runs before BestHTTP queues I/O.
+using BestSendFn = void* (*)(void*, void*);
+using ManagedGetFn = void* (*)(void*, void*);
+using ManagedSetFn = void (*)(void*, void*, void*);
+inline BestSendFn g_orig_best_send = nullptr;
+inline void* g_best_get_uri = nullptr;
+inline void* g_best_set_uri = nullptr;
+inline void* g_uri_absolute = nullptr;
+inline void* g_uri_ctor = nullptr;
+inline void* g_uri_class = nullptr;
+
+inline void* best_send_hook(void* self, void* method) {
+    if (self != nullptr) {
+        auto get = [](void* object, void* info) -> void* {
+            return object ? reinterpret_cast<ManagedGetFn>(il2cpp::method_pointer(info))(object, info) : nullptr;
+        };
+        void* uri = get(self, g_best_get_uri);
+        void* text = get(uri, g_uri_absolute);
+        std::string rewritten;
+        if (text && rewrite_url(il2cpp::to_utf8(text, kMaxUrlLength), &rewritten)) {
+            void* address = il2cpp::string_new(rewritten.c_str());
+            void* replacement = il2cpp::object_new(g_uri_class);
+            if (address && replacement) {
+                reinterpret_cast<ManagedSetFn>(il2cpp::method_pointer(g_uri_ctor))(replacement, address, g_uri_ctor);
+                reinterpret_cast<ManagedSetFn>(il2cpp::method_pointer(g_best_set_uri))(self, replacement, g_best_set_uri);
+                // URLs carry bearer credentials; do not log them.
+                LOGI("23.1.3-redirect: BestHTTP.Send redirected to selected backend");
+            }
+        }
+    }
+    return g_orig_best_send(self, method);
+}
+
+inline bool install_best_http() {
+    g_best_get_uri = il2cpp::find_method_info("BestHTTP", "HTTPRequest", "get_Uri", 0);
+    g_best_set_uri = il2cpp::find_method_info("BestHTTP", "HTTPRequest", "set_Uri", 1);
+    g_uri_absolute = il2cpp::find_method_info("System", "Uri", "get_AbsoluteUri", 0);
+    g_uri_ctor = il2cpp::find_method_info("System", "Uri", ".ctor", 1);
+    g_uri_class = il2cpp::find_class("System", "Uri");
+    if (!il2cpp::string_new || !il2cpp::object_new || !g_uri_class ||
+        !il2cpp::method_pointer(g_best_get_uri) || !il2cpp::method_pointer(g_best_set_uri) ||
+        !il2cpp::method_pointer(g_uri_absolute) || !il2cpp::method_pointer(g_uri_ctor)) {
+        LOGE("23.1.3-redirect: BestHTTP metadata unavailable; no hook installed");
+        return false;
+    }
+    return hook::install({"BestHTTP", "HTTPRequest", "Send", 0},
+                         reinterpret_cast<void*>(&best_send_hook),
+                         reinterpret_cast<void**>(&g_orig_best_send));
+}
+
 inline bool install() {
     if (g_installed) return true;
 
+    const bool best_http = install_best_http();
     int webrequest_hooks = 0;
     if (hook::install({kNetworkingNs, kWebRequest, ".ctor", 2},
                       reinterpret_cast<void*>(&uwr_ctor2_hook),
@@ -373,7 +428,7 @@ inline bool install() {
         ++www_hooks;
     }
 
-    if (webrequest_hooks == 0 && www_hooks == 0) {
+    if (webrequest_hooks == 0 && www_hooks == 0 && !best_http) {
         LOGE("23.1.3-redirect: neither UnityWebRequest nor WWW could be hooked; "
              "the game's traffic still leaves the device and no self-hosted "
              "server can answer it");
@@ -383,8 +438,8 @@ inline bool install() {
     g_installed = true;
     const std::string server = backend_client_2313::endpoint();
     LOGI("23.1.3-redirect: armed - %d/5 UnityWebRequest and %d/3 WWW entry "
-         "point(s) rewritten towards %s",
-         webrequest_hooks, www_hooks,
+         "point(s), BestHTTP=%d rewritten towards %s",
+         webrequest_hooks, www_hooks, best_http ? 1 : 0,
          server.empty() ? "<no server selected yet>" : server.c_str());
     return true;
 }

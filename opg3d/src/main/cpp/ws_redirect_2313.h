@@ -73,6 +73,7 @@
 #include "hook.h"
 #include "il2cpp.h"
 #include "log.h"
+#include "url_diagnostics_2313.h"
 
 namespace ws_redirect_2313 {
 namespace detail {
@@ -163,7 +164,7 @@ inline void report(const char* surface, const std::string& value,
     *remembered = value;
     ++(*counter);
     LOGI("23.1.3-ws: %s (#%" PRIu64 ")\n  address: %s", surface, *counter,
-         value.c_str());
+         url_diagnostics_2313::redact(value).c_str());
 }
 
 // Rebuilds a socket.io address against the selected backend. Accepts the ws
@@ -217,7 +218,7 @@ inline bool rewrite_address(const std::string& url, std::string* out) {
         LOGE("23.1.3-ws: the config socket address %s was built before any "
              "backend was selected, so it stays pointed at the retired service "
              "and the live config will not arrive (#%" PRIu64 ")",
-             url.c_str(), g_no_server);
+             url_diagnostics_2313::redact(url).c_str(), g_no_server);
         return false;
     }
     // The server never rewrites its own address into itself.
@@ -250,7 +251,7 @@ inline void manager_set_address_hook(void* self, void* value, void* method) {
             g_last_config_address = rewritten;
             LOGI("23.1.3-ws: the config socket was pointed at the self-hosted "
                  "backend (#%" PRIu64 ")\n  game asked for: %s\n  sent instead "
-                 "to: %s", g_rewrites, url.c_str(), rewritten.c_str());
+                 "to: %s", g_rewrites, url_diagnostics_2313::redact(url).c_str(), url_diagnostics_2313::redact(rewritten).c_str());
         }
     }
     if (replacement == nullptr) {
