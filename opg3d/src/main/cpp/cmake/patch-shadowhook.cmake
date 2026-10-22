@@ -124,3 +124,11 @@ else()
 endif()
 
 message(STATUS "patch-shadowhook: done")
+
+# The stable loader installs its startup gate from a C++ static initializer.
+# Initialize the engine's own TLS/signal bookkeeping before client constructors.
+foreach(ctor_src common/sh_errno.c common/bytesig.c sh_linker.c)
+ file(READ "${ctor_src}" ctor_content)
+ string(REPLACE "__attribute__((constructor))" "__attribute__((constructor(101)))" ctor_content "${ctor_content}")
+ file(WRITE "${ctor_src}" "${ctor_content}")
+endforeach()

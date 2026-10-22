@@ -84,3 +84,13 @@ The Photon room master simulates the native AI; the backend still owns player
 progress/configuration. It does not force offline mode or change matchmaking.
 See [Team Strike bot compatibility](docs/TEAM_STRIKE_BOTS_23_1_3.md) for round
 semantics, safeguards and verification limits. Escort is unchanged.
+
+## Native launcher / self-updating frontend
+
+The APK now embeds the permanent `libopg3d.so` launcher; the separately built
+`libopg3d_client.so` is signed and hosted by the backend. Do not package both as
+startup libraries. The loader checks servers, blocks game initialization until
+Play, verifies signatures, and loads the selected cached/downloaded payload.
+The old direct-loading deployment instructions describe the pre-loader layout;
+use [the current native loader guide](docs/NATIVE_LOADER.md) for packaging,
+publishing, trust keys and verification limits. No new DEX classes are required.

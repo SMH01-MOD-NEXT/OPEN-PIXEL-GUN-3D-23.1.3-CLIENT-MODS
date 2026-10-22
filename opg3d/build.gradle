@@ -26,8 +26,9 @@ android {
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
-                targets 'opg3d'
-                arguments "-DOPG3D_APPID_KEY=${appIdKey}".toString(),
+                targets 'opg3d', 'opg3d_client'
+                arguments "-DOPG3D_RELEASE_PUBLIC_KEY_FILE=${providers.gradleProperty('OPG3D_RELEASE_PUBLIC_KEY_FILE').orElse('').get()}".toString(),
+                        "-DOPG3D_APPID_KEY=${appIdKey}".toString(),
                         "-DOPG3D_DEFAULT_SERVER=${defaultServer}".toString(),
                         "-DOPG3D_DIAGNOSTICS=${diagnostics}".toString(),
                         "-DOPG3D_POST_MATCH_TRACE=${postMatchTrace}".toString()

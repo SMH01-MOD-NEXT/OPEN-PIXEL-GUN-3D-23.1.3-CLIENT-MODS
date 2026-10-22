@@ -93,14 +93,14 @@ target_link_libraries(shadowhook_static PUBLIC log dl)
 # the separate OPEN-PIXEL-GUN-3D-BACKEND project; what remains here is the
 # exact-build startup compatibility patch, expansion-file provisioning, boot
 # diagnostics and the Photon transport.
-add_library(opg3d SHARED
+add_library(opg3d_client SHARED
     main.cpp
     elf_sym.cpp
     il2cpp.cpp
     hook.cpp
 )
 
-target_include_directories(opg3d PRIVATE .)
+target_include_directories(opg3d_client PRIVATE .)
 
 # -fno-exceptions is not about binary size but about stack-unwinder
 # compatibility. Do not remove it.
@@ -134,7 +134,7 @@ target_include_directories(opg3d PRIVATE .)
 # EXIDX_CANTUNWIND, unwinding would stop at our frame and fail in
 # std::terminate. The regression is guarded by the "Assert no LLVM C++
 # personality" step in .github/workflows/build.yml.
-target_compile_options(opg3d PRIVATE
+target_compile_options(opg3d_client PRIVATE
     -O2
     -fno-exceptions
     -funwind-tables
@@ -144,12 +144,12 @@ target_compile_options(opg3d PRIVATE
     -Wall
     -Wextra
 )
-target_link_options(opg3d PRIVATE
+target_link_options(opg3d_client PRIVATE
     -Wl,--gc-sections
     -Wl,--exclude-libs,ALL
 )
 
-target_compile_definitions(opg3d PRIVATE
+target_compile_definitions(opg3d_client PRIVATE
     OPG3D_APPID_KEY="${OPG3D_APPID_KEY}"
     OPG3D_DEFAULT_SERVER="${OPG3D_DEFAULT_SERVER}"
     OPG3D_DIAGNOSTICS=${OPG3D_DIAGNOSTICS}
@@ -162,9 +162,30 @@ target_compile_definitions(opg3d PRIVATE
 # code come from), and the extracted expansion file is verified against the
 # CRC-32 recorded in the archive. libz is an NDK-public system library, so this
 # adds a DT_NEEDED on libz.so and nothing to the artifact.
-target_link_libraries(opg3d PRIVATE
+target_link_libraries(opg3d_client PRIVATE
     shadowhook_static
     log
     dl
     z
 )
+
+# Stable APK loader: no Java/DEX bridge, no game hooks before Play.
+set(OPG3D_RELEASE_PUBLIC_KEY_FILE "" CACHE FILEPATH "Pinned RSA SPKI public key")
+if(NOT OPG3D_RELEASE_PUBLIC_KEY_FILE)
+ set(OPG3D_RELEASE_PUBLIC_KEY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/loader/release-public.der")
+endif()
+if(EXISTS "${OPG3D_RELEASE_PUBLIC_KEY_FILE}")
+ file(READ "${OPG3D_RELEASE_PUBLIC_KEY_FILE}" OPG3D_RELEASE_KEY_HEX HEX)
+else()
+ message(FATAL_ERROR "Native loader requires a pinned RSA public key")
+endif()
+# Embed the HTML from a single source on every configure (no stale UI copy).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/loader/ui.html")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/loader/ui.html" OPG3D_LOADER_HTML)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ui_embedded.h" "#pragma once\nnamespace launcher { constexpr const char* html = R\"OPG3DHTML(${OPG3D_LOADER_HTML})OPG3DHTML\"; }\n")
+add_library(opg3d SHARED loader/loader.cpp elf_sym.cpp)
+target_include_directories(opg3d PRIVATE . "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_options(opg3d PRIVATE -O2 -fno-exceptions -funwind-tables -fvisibility=hidden -Wall -Wextra)
+target_compile_definitions(opg3d PRIVATE OPG3D_RELEASE_KEY_HEX="${OPG3D_RELEASE_KEY_HEX}")
+target_link_options(opg3d PRIVATE -Wl,--exclude-libs,ALL)
+target_link_libraries(opg3d PRIVATE shadowhook_static log dl z)

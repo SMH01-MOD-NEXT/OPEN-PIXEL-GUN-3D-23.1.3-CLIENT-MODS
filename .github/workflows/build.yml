@@ -64,7 +64,7 @@ jobs:
             echo "::error::llvm-nm not found under $NDK_ROOT — fix the path in this guard"
             exit 1
           fi
-          OBJS="$(find . -type f -name '*.cpp.o' -path '*opg3d.dir*')"
+          OBJS="$(find . -type f -name '*.cpp.o' \( -path '*opg3d.dir*' -o -path '*opg3d_client.dir*' \))"
           if [ -z "$OBJS" ]; then
             echo "::error::opg3d object files not found — AGP changed the layout, fix the path in this guard"
             exit 1
@@ -78,14 +78,16 @@ jobs:
 
       - name: Collect libopg3d.so
         run: |
-          mkdir -p out
-          find opg3d/build/intermediates -path "*arm64-v8a*" -name "libopg3d.so" -exec cp -v {} out/ \;
-          test "$(find out -maxdepth 1 -type f | wc -l)" -eq 1
+          mkdir -p out/apk out/server
+          cp lib/arm64-v8a/libopg3d.so out/apk/
+          cp lib/arm64-v8a/libopg3d_client.so out/server/
+          c++ -std=c++17 -Wall -Wextra -Werror tools/test_loader_policy.cpp -o /tmp/test-loader-policy
+          /tmp/test-loader-policy
           ls -la out/
 
       - name: Upload libopg3d.so
         uses: actions/upload-artifact@v4
         with:
           name: libopg3d-arm64-v8a
-          path: out/libopg3d.so
+          path: out/
           if-no-files-found: error

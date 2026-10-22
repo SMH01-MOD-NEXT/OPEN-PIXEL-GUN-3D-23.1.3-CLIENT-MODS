@@ -52,6 +52,8 @@
 
 namespace {
 
+void (*g_payload_ready_callback)() = nullptr;
+
 constexpr const char* kIl2Cpp = "libil2cpp.so";
 constexpr int kWaitSteps = 6000;
 constexpr useconds_t kWaitStepUs = 10 * 1000;
@@ -362,6 +364,7 @@ void* init_thread(void*) {
 
     if (signature_compat && backend_redirect && photon_online &&
         default_plugin && websocket_redirect) {
+        if (g_payload_ready_callback) g_payload_ready_callback();
         LOGI("init: functional 23.1.3 thin client ready; diagnostic hook "
              "availability does not affect this verdict");
     } else {
@@ -379,7 +382,7 @@ void* init_thread(void*) {
 
 } // namespace
 
-__attribute__((constructor)) static void on_load() {
+static void on_load() {
     if (feature_config::startup::obb_provisioner) {
         (void)obb_framework_dir::prepare();
         (void)obb_provisioner::provision();
@@ -405,4 +408,19 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
         (void)obb_provisioner::provision();
     }
     return JNI_VERSION_1_6;
+}
+
+// Explicit, versioned loader ABI: dlopen itself must not start any game work.
+extern "C" JNIEXPORT int opg3d_payload_abi() { return 1; }
+extern "C" JNIEXPORT int opg3d_payload_start(const char* endpoint) {
+    static bool started = false;
+    if (started || endpoint == nullptr || *endpoint == '\0') return 0;
+    if (setenv("OPG3D_SERVER", endpoint, 1) != 0) return 0;
+    started = true;
+    on_load();
+    return 1;
+}
+
+extern "C" JNIEXPORT void opg3d_payload_set_ready_callback(void (*callback)()) {
+    g_payload_ready_callback = callback;
 }

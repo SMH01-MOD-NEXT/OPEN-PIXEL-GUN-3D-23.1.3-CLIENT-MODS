@@ -19,7 +19,7 @@
 #endif
 
 #ifndef OPG3D_BUILD_TAG
-#define OPG3D_BUILD_TAG "23.1.3 ARM64 thin client v3 (Team Strike bot compatibility, optional diagnostics)"
+#define OPG3D_BUILD_TAG "23.1.3 ARM64 downloadable client v1 (native loader ABI1, Team Strike bots)"
 #endif
 
 #define OPG3D_BUILD_STAMP OPG3D_BUILD_TAG " built " __DATE__ " " __TIME__
