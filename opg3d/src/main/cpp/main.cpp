@@ -40,6 +40,7 @@
 #include "obb_provisioner.h"
 #include "photon_2313.h"
 #include "photon_default_plugin_2313.h"
+#include "custom_lobby_2313.h"
 #include "runtime_dispatch_2313.h"
 #include "photon_trace_2313.h"
 #include "sio_codec_trace_2313.h"
@@ -277,6 +278,9 @@ void install_runtime_components(uintptr_t base, bool signature_compat) {
         "network", "Photon default plugin",
         feature_config::network::photon_default_plugin,
         []() { return photon_default_plugin_2313::install_hooks(); });
+    (void)install_component(
+        "network", "Custom room lobby", feature_config::network::photon_online,
+        []() { return custom_lobby_2313::install_hooks(); });
     (void)install_component(
         "diagnostics", "Photon trace", feature_config::network::photon_trace,
         []() { return photon_trace_2313::install_hooks(); });
