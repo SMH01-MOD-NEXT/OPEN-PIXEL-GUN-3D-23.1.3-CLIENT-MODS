@@ -49,6 +49,7 @@
 #include "admin_resync_2313.h"
 #include "team_strike_bots_2313.h"
 #include "escort_bots_2313.h"
+#include "bot_aim_2313.h"
 #include "ui_progress_trace_2313.h"
 #include "version_2313.h"
 #include "ws_redirect_2313.h"
@@ -164,6 +165,8 @@ void install_runtime_components(uintptr_t base, bool signature_compat) {
         []() { return team_strike_bots_2313::install(); });
     (void)install_component("gameplay", "Escort objective bots", true,
         []() { return escort_bots_2313::install(); });
+    (void)install_component("gameplay", "Bounded bot combat tracking", true,
+        []() { return bot_aim_2313::install(); });
 
     (void)install_component(
         "diagnostics", "lifecycle trace",

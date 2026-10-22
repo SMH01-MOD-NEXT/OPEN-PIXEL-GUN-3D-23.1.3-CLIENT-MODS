@@ -35,6 +35,12 @@ jobs:
             tools/test_escort_bots.cpp -o /tmp/test-escort-bots -pthread -ldl
           /tmp/test-escort-bots
 
+      - name: Test bounded bot aim compatibility
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Itools/test_support \
+            tools/test_bot_aim.cpp -o /tmp/test-bot-aim -pthread -ldl
+          /tmp/test-bot-aim
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
