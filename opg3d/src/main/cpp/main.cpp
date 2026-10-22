@@ -40,6 +40,7 @@
 #include "obb_provisioner.h"
 #include "photon_2313.h"
 #include "photon_default_plugin_2313.h"
+#include "runtime_dispatch_2313.h"
 #include "photon_trace_2313.h"
 #include "sio_codec_trace_2313.h"
 #include "startup_trace_2313.h"
@@ -139,86 +140,12 @@ size_t assembly_count(void* domain) {
     return count;
 }
 
-void* init_thread(void*) {
-    LOGI("init: libopg3d build %s", OPG3D_BUILD_STAMP);
-    LOGI("init: [0/6] 23.1.3 ARM64 thin-client bootstrap started");
+// Written by the bootstrap worker, published by the dispatcher release-store,
+// and read only by its once-consumed Unity-thread job.
+uintptr_t g_runtime_base = 0;
+bool g_signature_compat = false;
 
-    uintptr_t base = 0u;
-    bool found = false;
-    for (int i = 0; i < kWaitSteps && !found; ++i) {
-        found = elfsym::find_library(kIl2Cpp, &base);
-        if (!found) usleep(kWaitStepUs);
-    }
-    if (!found) {
-        LOGE("init: %s not found after 60 seconds", kIl2Cpp);
-        return nullptr;
-    }
-    LOGI("init: [1/6] %s found, base=0x%" PRIxPTR, kIl2Cpp, base);
-
-    const bool signature_compat = install_component(
-        "startup", "signature compatibility",
-        feature_config::startup::signature_compatibility,
-        [base]() { return version_2313::install_early_signature_patch(base); });
-    if (!signature_compat) {
-        LOGE("init: exact 23.1.3 APK re-sign compatibility was not installed; "
-             "startup remains fail-closed");
-    }
-
-    bool resolved = false;
-    for (int i = 0; i < kWaitSteps && !resolved; ++i) {
-        resolved = il2cpp::resolve();
-        if (!resolved) usleep(kWaitStepUs);
-    }
-    if (!resolved) {
-        LOGE("init: required il2cpp_* exports were not resolved");
-        return nullptr;
-    }
-    LOGI("init: [2/6] IL2CPP API resolved");
-
-    // 23.1.3's il2cpp_domain_get() crashes if used as a pre-init poll. Wait
-    // on the exact build's validated root-domain publication slot instead.
-    void* domain = il2cpp_runtime_2313::wait_for_domain(
-        base, kWaitSteps, kWaitStepUs);
-    if (domain == nullptr) {
-        LOGE("init: IL2CPP root domain did not become safely available");
-        return nullptr;
-    }
-    LOGI("init: [3/6] domain=%p", domain);
-
-    size_t last = 0u;
-    int stable = 0;
-    for (int i = 0; i < kWaitSteps && stable < kStableChecks; ++i) {
-        const size_t now = assembly_count(domain);
-        stable = (now != 0u && now == last) ? stable + 1 : 0;
-        last = now;
-        usleep(kWaitStepUs);
-    }
-    if (stable < kStableChecks) {
-        LOGE("init: assembly list never settled (last count=%zu)", last);
-        return nullptr;
-    }
-    LOGI("init: [4/6] assembly list settled at %zu assemblies", last);
-    usleep(kSettleUs);
-
-    void* attached_thread = il2cpp::thread_attach(domain);
-    if (attached_thread == nullptr) {
-        LOGE("init: il2cpp_thread_attach failed");
-        return nullptr;
-    }
-    LOGI("init: [5/6] thread attached to runtime");
-
-    void* image = nullptr;
-    for (int i = 0; i < kWaitSteps && image == nullptr; ++i) {
-        image = il2cpp::find_image("Assembly-CSharp.dll");
-        if (image == nullptr) usleep(kWaitStepUs);
-    }
-    if (image == nullptr) {
-        LOGE("init: Assembly-CSharp.dll never appeared; nothing to hook");
-        if (il2cpp::thread_detach != nullptr) il2cpp::thread_detach(attached_thread);
-        return nullptr;
-    }
-    LOGI("init: [6/6] Assembly-CSharp.dll ready; installing 23.1.3 hooks");
-
+void install_runtime_components(uintptr_t base, bool signature_compat) {
     (void)install_component(
         "startup", "Switcher loading clock",
         true,
@@ -374,9 +301,98 @@ void* init_thread(void*) {
              photon_online ? 1 : 0, default_plugin ? 1 : 0,
              websocket_redirect ? 1 : 0);
     }
+}
+
+void install_runtime_job() {
+    install_runtime_components(g_runtime_base, g_signature_compat);
+}
+
+void* init_thread(void*) {
+    LOGI("init: libopg3d build %s", OPG3D_BUILD_STAMP);
+    LOGI("init: [0/6] 23.1.3 ARM64 thin-client bootstrap started");
+
+    uintptr_t base = 0u;
+    bool found = false;
+    for (int i = 0; i < kWaitSteps && !found; ++i) {
+        found = elfsym::find_library(kIl2Cpp, &base);
+        if (!found) usleep(kWaitStepUs);
+    }
+    if (!found) {
+        LOGE("init: %s not found after 60 seconds", kIl2Cpp);
+        return nullptr;
+    }
+    LOGI("init: [1/6] %s found, base=0x%" PRIxPTR, kIl2Cpp, base);
+
+    const bool signature_compat = install_component(
+        "startup", "signature compatibility",
+        feature_config::startup::signature_compatibility,
+        [base]() { return version_2313::install_early_signature_patch(base); });
+    if (!signature_compat) {
+        LOGE("init: exact 23.1.3 APK re-sign compatibility was not installed; "
+             "startup remains fail-closed");
+    }
+
+    bool resolved = false;
+    for (int i = 0; i < kWaitSteps && !resolved; ++i) {
+        resolved = il2cpp::resolve();
+        if (!resolved) usleep(kWaitStepUs);
+    }
+    if (!resolved) {
+        LOGE("init: required il2cpp_* exports were not resolved");
+        return nullptr;
+    }
+    LOGI("init: [2/6] IL2CPP API resolved");
+
+    // 23.1.3's il2cpp_domain_get() crashes if used as a pre-init poll. Wait
+    // on the exact build's validated root-domain publication slot instead.
+    void* domain = il2cpp_runtime_2313::wait_for_domain(
+        base, kWaitSteps, kWaitStepUs);
+    if (domain == nullptr) {
+        LOGE("init: IL2CPP root domain did not become safely available");
+        return nullptr;
+    }
+    LOGI("init: [3/6] domain=%p", domain);
+
+    size_t last = 0u;
+    int stable = 0;
+    for (int i = 0; i < kWaitSteps && stable < kStableChecks; ++i) {
+        const size_t now = assembly_count(domain);
+        stable = (now != 0u && now == last) ? stable + 1 : 0;
+        last = now;
+        usleep(kWaitStepUs);
+    }
+    if (stable < kStableChecks) {
+        LOGE("init: assembly list never settled (last count=%zu)", last);
+        return nullptr;
+    }
+    LOGI("init: [4/6] assembly list settled at %zu assemblies", last);
+    usleep(kSettleUs);
+
+    void* attached_thread = il2cpp::thread_attach(domain);
+    if (attached_thread == nullptr) {
+        LOGE("init: il2cpp_thread_attach failed");
+        return nullptr;
+    }
+    LOGI("init: [5/6] thread attached to runtime");
+
+    void* image = nullptr;
+    for (int i = 0; i < kWaitSteps && image == nullptr; ++i) {
+        image = il2cpp::find_image("Assembly-CSharp.dll");
+        if (image == nullptr) usleep(kWaitStepUs);
+    }
+    if (image == nullptr) {
+        LOGE("init: Assembly-CSharp.dll never appeared; nothing to hook");
+        if (il2cpp::thread_detach != nullptr) il2cpp::thread_detach(attached_thread);
+        return nullptr;
+    }
+    LOGI("init: [6/6] Assembly-CSharp.dll ready; scheduling 23.1.3 hooks");
+
+    g_runtime_base = base;
+    g_signature_compat = signature_compat;
+    (void)runtime_dispatch_2313::schedule(&install_runtime_job);
 
     if (il2cpp::thread_detach != nullptr) il2cpp::thread_detach(attached_thread);
-    LOGI("init: 23.1.3 bootstrap initialization finished cleanly");
+    LOGI("init: 23.1.3 bootstrap worker finished; runtime readiness reported by Unity job");
     return nullptr;
 }
 
