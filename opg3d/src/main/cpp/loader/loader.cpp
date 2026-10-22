@@ -179,7 +179,9 @@ bool probe(const std::string &raw, bool local) {
   v.online = true;
   v.version = field(body, "game_version");
   v.name = field(body, "server_name");
-  v.country = local ? "Local" : field(body, "country");
+  v.country = policy::is_official(ep) ? policy::official_country
+              : local                 ? "Local"
+                                      : field(body, "country");
   if (v.country.empty())
     v.country = "ZZ";
   v.compatible = number(body, "protocol") == 1 &&
@@ -249,6 +251,21 @@ void discover() {
 }
 void scan() {
   status(text::searching);
+  // Seed the pinned official endpoint even on a fresh installation/offline
+  // launch. Only this compiled endpoint receives the official UI badge.
+  {
+    std::lock_guard<std::mutex> g(lock);
+    auto it = std::find_if(servers.begin(), servers.end(), [](const Server &v) {
+      return policy::is_official(v.endpoint);
+    });
+    if (it == servers.end()) {
+      Server v;
+      v.endpoint = policy::official_endpoint;
+      v.name = "Open Pixel Gun";
+      v.country = policy::official_country;
+      servers.insert(servers.begin(), v);
+    }
+  }
   auto saved = read(dir + "/connections.txt");
   size_t at = 0;
   int count = 0;
@@ -269,19 +286,22 @@ void scan() {
             v.endpoint = ep;
             v.name = ep;
             v.country = "ZZ";
-            servers.push_back(v);
+            if (servers.size() < 32)
+              servers.push_back(v);
           } else {
             it->online = false;
             it->compatible = false;
           }
         }
-        probe(ep, false);
+        if (!policy::is_official(ep))
+          probe(ep, false);
       }
     }
     if (end == std::string::npos)
       break;
     at = end + 1;
   }
+  probe(policy::official_endpoint, false);
   discover();
   status(text::ready);
 }
@@ -501,7 +521,8 @@ std::string state() {
       j += ",";
     first = false;
     j += "{\"endpoint\":" + quote(s.endpoint) + ",\"name\":" + quote(s.name) +
-         ",\"country\":" + quote(s.country) +
+         ",\"country\":" + quote(s.country) + ",\"official\":" +
+         (policy::is_official(s.endpoint) ? "true" : "false") +
          ",\"version\":" + quote(s.version) +
          ",\"online\":" + (s.online ? "true" : "false") +
          ",\"compatible\":" + (s.compatible ? "true" : "false") + "}";

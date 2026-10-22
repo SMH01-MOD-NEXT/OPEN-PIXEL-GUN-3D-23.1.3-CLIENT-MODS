@@ -99,3 +99,13 @@ Physical device checks must additionally cover screenshot capture, background/
 resume, keyboard/manual selection, first download, changed release and cached
 launch all the way to the game lobby. Only tested device/OS combinations should
 be reported as verified; runtime platform hooks are not a universal Android claim.
+
+## Built-in official server
+
+The launcher seeds `13.51.187.37:8080` on every scan/fresh install. It is labeled
+as official only by exact compiled endpoint identity, never by remote metadata.
+CountrySE renders Sweden/Швеция via localized region names. Offline entries stay
+visible; the existing version/maintenance/release gates still disable Play.
+Manual and LAN connections retain their existing behavior. This requires a
+one-time permanent loader replacement in existing APKs; downloadable gameplay
+modules cannot change that APK-resident code.

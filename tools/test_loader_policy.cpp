@@ -13,6 +13,11 @@ int main() {
                  "host:80/path", "host:80\r\nX:2", "https://host:443",
                  "user@host:80", "../host:80", "a..b:80", "host:", ":80"})
     assert(!endpoint(s, &host, &port));
+  assert(is_official("13.51.187.37:8080"));
+  assert(!is_official("13.51.187.37:8081"));
+  assert(!is_official("13.51.187.37.attacker.test:8080"));
+  assert(std::string(official_country) == "SE");
+  assert(endpoint(official_endpoint, &host, &port));
   assert(valid_hash(std::string(64, 'a')));
   assert(!valid_hash(std::string(64, 'A')));
   assert(!valid_hash("../../private"));

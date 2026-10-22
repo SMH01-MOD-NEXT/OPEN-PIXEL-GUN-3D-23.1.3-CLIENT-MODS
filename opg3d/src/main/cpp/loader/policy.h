@@ -3,6 +3,11 @@
 #include <cstdlib>
 #include <string>
 namespace launcher::policy {
+inline constexpr const char *official_endpoint = "13.51.187.37:8080";
+inline constexpr const char *official_country = "SE";
+inline bool is_official(const std::string &endpoint) {
+  return endpoint == official_endpoint;
+}
 inline bool valid_hash(const std::string &s) {
   return s.size() == 64 &&
          s.find_first_not_of("0123456789abcdef") == std::string::npos;
