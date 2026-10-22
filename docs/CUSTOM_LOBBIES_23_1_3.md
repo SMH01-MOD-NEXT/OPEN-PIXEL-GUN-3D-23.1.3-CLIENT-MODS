@@ -62,3 +62,19 @@ artifacts and verify the public manifest, signature, binary hash and health.
 Do not deploy signing private keys. A rollback for clients which accepted build
 20 must publish the previous artifact under a higher signed build number, not
 simply restore the old build-3 manifest.
+
+## AWS publication result
+
+The user-authorized publication completed on the official EC2 Sweden server:
+public manifest build 20 matches the tested artifact above. Public RSA signature,
+artifact size/SHA-256 and `/api/v1/ping` were verified after the atomic manifest
+switch. Backend and gateway service PIDs were unchanged; no restart was issued.
+Account data, environment and backend executable were not copied or changed.
+
+Previous artifacts and the build-3 manifest were retained. A signed build-21
+rollback manifest for the previous artifact was prepared and stored in the
+root-only deployment backup; it was NOT activated. The publisher public key
+was already identical and was not replaced. No private key was sent to EC2.
+
+Players receive the module on the next normal game launch after selecting the
+official server. Existing sessions are not hot-updated or forcibly disconnected.
