@@ -29,6 +29,12 @@ jobs:
             tools/test_team_strike_bots.cpp -o /tmp/test-team-strike-bots -pthread -ldl
           /tmp/test-team-strike-bots
 
+      - name: Test Escort bot compatibility
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Itools/test_support \
+            tools/test_escort_bots.cpp -o /tmp/test-escort-bots -pthread -ldl
+          /tmp/test-escort-bots
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 

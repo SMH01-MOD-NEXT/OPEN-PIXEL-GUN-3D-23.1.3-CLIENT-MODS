@@ -26,6 +26,10 @@ inline Binding max_get, humans_get, properties_get, spawn_bot, remove_bot, roste
 inline void *mode_field, *duel_field, *status_field, *blue_field, *red_field;
 inline void *connecting_blue_field, *connecting_red_field, *instances_field;
 inline void *bot_nst_field, *bot_team_field, *dead_field, *bot_controller_field, *bot_view_field;
+// Shared manager entry points have one inline-hook owner. Other mode adapters
+// return true only when they handled their own exact online mode.
+inline bool (*additional_update)(void*, const void*) = nullptr;
+inline bool (*additional_initial_fill)() = nullptr;
 inline Void original_update = nullptr, original_initial_fill = nullptr;
 inline Void original_duel_update = nullptr, original_duel_awake = nullptr;
 inline std::atomic<bool> active{false};
@@ -113,6 +117,7 @@ struct List {
     void* item(int i) const { return item_fn ? item_fn(object, i, item_info) : nullptr; }
 };
 inline void initial_fill(void* self, const void* info) {
+    if (additional_initial_fill && additional_initial_fill()) return;
     // Stock legacy initialization spawns a group in one frame. This mode uses
     // only the scheduler below, never both fill paths simultaneously.
     if (active.load() && team_strike() && online_joined()) return;
@@ -131,6 +136,7 @@ inline void mark_unspawned(void* bot, void* nst, int status) {
     }
 }
 inline void update(void* self, const void* info) {
+    if (additional_update && additional_update(self, info)) return;
     if (!active.load() || !team_strike() || !online_joined()) {
         cadence = {}; previous_status = previous_bots = -1;
         if (original_update) original_update(self, info);
