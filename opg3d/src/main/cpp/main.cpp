@@ -45,6 +45,7 @@
 #include "startup_trace_2313.h"
 #include "startup_clock_2313.h"
 #include "admin_resync_2313.h"
+#include "team_strike_bots_2313.h"
 #include "ui_progress_trace_2313.h"
 #include "version_2313.h"
 #include "ws_redirect_2313.h"
@@ -225,6 +226,11 @@ void* init_thread(void*) {
         "progress", "targeted admin resynchronization",
         true,
         []() { return admin_resync_2313::install(); });
+
+    (void)install_component(
+        "gameplay", "Team Strike staggered bots",
+        true,
+        []() { return team_strike_bots_2313::install(); });
 
     (void)install_component(
         "diagnostics", "lifecycle trace",

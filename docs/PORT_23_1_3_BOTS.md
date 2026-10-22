@@ -1,5 +1,8 @@
 # 23.1.3 — bots: why they are weak, and what can actually be changed
 
+> Historical research notes. Current Team Strike implementation and online-only
+> safeguards: [TEAM_STRIKE_BOTS_23_1_3.md](TEAM_STRIKE_BOTS_23_1_3.md).
+
 Reported: bots are weak, always carry the starter rifle, and exist only in some
 modes. Requested: stronger bots, bots in Duel and Escort, and mode-aware
 behaviour (Duel = aggressive but not cheater-like; Escort = attackers escort the

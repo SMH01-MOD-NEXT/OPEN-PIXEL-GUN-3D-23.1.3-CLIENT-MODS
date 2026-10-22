@@ -75,3 +75,12 @@ See [`docs/PORT_23_1_3_THIN_CLIENT.md`](docs/PORT_23_1_3_THIN_CLIENT.md) for bui
 ## License
 
 Project code is licensed under GPLv3; see [LICENSE](LICENSE). ShadowHook is MIT-licensed; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Online Team Strike bots (23.1.3)
+
+The exact-build client bridge can fill an already joined **online** Team Strike
+room with one stock Photon bot every ten seconds, up to the room/team limits.
+The Photon room master simulates the native AI; the backend still owns player
+progress/configuration. It does not force offline mode or change matchmaking.
+See [Team Strike bot compatibility](docs/TEAM_STRIKE_BOTS_23_1_3.md) for round
+semantics, safeguards and verification limits. Escort is unchanged.
