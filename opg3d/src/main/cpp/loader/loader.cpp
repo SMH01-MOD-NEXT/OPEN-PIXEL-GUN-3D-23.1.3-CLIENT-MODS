@@ -509,7 +509,7 @@ void play(const std::string &ep) {
 std::string state() {
   std::lock_guard<std::mutex> g(lock);
   std::string j =
-      "{\"message\":" + quote(message) +
+      "{\"messageKey\":" + quote(message) +
       ",\"busy\":" + (busy ? "true" : "false") +
       ",\"percent\":" + std::to_string(percent.load()) +
       ",\"launched\":" + (launched ? "true" : "false") +

@@ -41,6 +41,14 @@ jobs:
             tools/test_bot_aim.cpp -o /tmp/test-bot-aim -pthread -ldl
           /tmp/test-bot-aim
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test launcher localization
+        run: node tools/test_loader_ui.mjs
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 

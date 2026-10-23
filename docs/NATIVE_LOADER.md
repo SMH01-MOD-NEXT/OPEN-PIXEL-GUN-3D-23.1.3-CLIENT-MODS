@@ -109,3 +109,32 @@ visible; the existing version/maintenance/release gates still disable Play.
 Manual and LAN connections retain their existing behavior. This requires a
 one-time permanent loader replacement in existing APKs; downloadable gameplay
 modules cannot change that APK-resident code.
+
+## Launcher localization
+
+The embedded UI owns all user-visible RU/EN strings, including native update,
+connection and security statuses. Native code emits stable `messageKey` IDs
+from `loader/strings.h`; the UI never displays native strings directly. Russian
+WebView locales use Russian; English and unsupported/missing locales use English.
+The document language, port accessibility label and LAN region label follow the
+same locale. Server-provided names remain unchanged. No server protocol or
+signed-payload change is required.
+
+Run `node tools/test_loader_ui.mjs` to exercise all 16 native statuses, dictionary
+parity, locale fallback, labels, region names, progress, actions and errors.
+Changes to this embedded UI require rebuilding and replacing the standalone APK
+with the existing signing certificate (`adb install -r`), not clearing app data.
+
+### Verified localized APK rebuild
+
+- Gradle `check :opg3d:assembleRelease`, diagnostics disabled: passed.
+- Loader UI regression suite (16 statuses, six locale variants), 11 Python tests
+  and 10 native regression executables: passed.
+- Resident loader SHA-256: `abf2b84555c7a605a30e678655b42bae6abca48b357b056fe154d19e9a77d104`.
+- Standalone APK SHA-256: `c2e26258b3ba606f71224128cb71832982533781f0f491ebdee530ed7ad8b5e3`.
+- Existing signing certificate and 16 KiB alignment verified. Compared with the
+  previous APK, only the resident loader and signature entries changed; game
+  binary, assets and DEX contents are identical. No payload library is bundled.
+- Signed gameplay release 33 on AWS is unchanged.
+- Installed in-place on Nothing A059P with system locale `en-DE`; the English
+  interface and native ready status were visually verified. App data was not cleared.
