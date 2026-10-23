@@ -94,6 +94,7 @@ inline int g_port = kDefaultPort;
 inline std::string g_device_id;
 inline std::string g_player_id;
 inline std::string g_session;
+inline std::string g_diagnostics_token;
 inline std::string g_appid_pun;
 inline std::string g_source = "none";
 inline bool g_started = false;
@@ -392,19 +393,24 @@ inline int connect_to(const std::string& host, int port) {
 
 inline Response request(const char* method, const std::string& path,
                        const std::string& body, const char* content_type,
-                       bool authenticated) {
+                       bool authenticated, const std::string& expected_endpoint = {},
+                       const std::string& expected_player = {}) {
     Response response;
     std::string host;
     int port = 0;
+    bool scoped_diagnostics = false;
     std::string session;
     std::string player;
     std::string device;
     uint64_t number = 0u;
     {
         Guard guard;
+        if ((!expected_endpoint.empty() && expected_endpoint != g_host + ":" + std::to_string(g_port)) ||
+            (!expected_player.empty() && expected_player != g_player_id)) return response;
         host = g_host;
         port = g_port;
-        session = g_session;
+        scoped_diagnostics = path == "/api/v1/client-errors" && !g_diagnostics_token.empty();
+        session = scoped_diagnostics ? g_diagnostics_token : g_session;
         player = g_player_id;
         device = g_device_id;
         number = ++g_requests;
@@ -423,7 +429,8 @@ inline Response request(const char* method, const std::string& path,
     head += "Accept: application/json\r\n";
     if (!device.empty()) head += "X-OPG3D-Device: " + device + "\r\n";
     if (authenticated && !session.empty()) {
-        head += "Authorization: Bearer " + session + "\r\n";
+        if (scoped_diagnostics) head += "X-OPG3D-Diagnostics: " + session + "\r\n";
+        else head += "Authorization: Bearer " + session + "\r\n";
         head += "X-OPG3D-Session: " + session + "\r\n";
     }
     if (authenticated && !player.empty()) {
@@ -442,8 +449,8 @@ inline Response request(const char* method, const std::string& path,
          "session=%s body=%s",
          number, method, authenticated ? "(auth)" : "(anon)", host.c_str(), port,
          path.c_str(), body.size(),
-         session.empty() ? "<none>" : masked(session).c_str(),
-         body.empty() ? "<empty>" : preview(body).c_str());
+         session.empty() ? "<none>" : (path=="/api/v1/client-errors" ? "<set>" : masked(session).c_str()),
+         path=="/api/v1/client-errors" ? "<diagnostic body redacted>" : (body.empty() ? "<empty>" : preview(body).c_str()));
 
     const int fd = connect_to(host, port);
     if (fd < 0) return response;
@@ -504,7 +511,7 @@ inline Response request(const char* method, const std::string& path,
     LOGI("23.1.3-client: req#%" PRIu64 " <- status=%d ms=%" PRIu64
          " bytes=%zu body=%s",
          number, response.status, elapsed, response.body.size(),
-         response.body.empty() ? "<empty>" : preview(response.body).c_str());
+         path == "/api/v1/accounts/register" ? "<credentials redacted>" : (response.body.empty() ? "<empty>" : preview(response.body).c_str()));
     return response;
 }
 
@@ -716,19 +723,22 @@ inline bool register_device() {
 
     std::string player;
     std::string session;
+    std::string diagnostics_token;
     std::string nick;
     if (!json_string(response.body, "player_id", &player) ||
         !json_string(response.body, "session", &session)) {
         LOGE("23.1.3-client: registration answer had no player_id/session; the "
-             "server sent: %s", preview(response.body).c_str());
+             "server sent: %s", "<credentials redacted>");
         return false;
     }
     (void)json_string(response.body, "nick", &nick);
+    (void)json_string(response.body, "diagnostics_token", &diagnostics_token);
 
     {
         Guard guard;
         g_player_id = player;
         g_session = session;
+        g_diagnostics_token = diagnostics_token;
     }
     LOGI("23.1.3-client: signed in as player_id=%s nick=%s session=%s",
          player.c_str(), nick.empty() ? "<unset>" : nick.c_str(),

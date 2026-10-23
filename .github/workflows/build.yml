@@ -47,6 +47,11 @@ jobs:
             tools/test_server_store.cpp -o /tmp/test-server-store -pthread
           /tmp/test-server-store
 
+      - name: Test client diagnostics privacy and queue
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tools/test_client_diagnostics.cpp -o /tmp/test-client-diagnostics -pthread
+          /tmp/test-client-diagnostics
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

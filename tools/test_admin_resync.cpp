@@ -9,6 +9,8 @@ std::string to_utf8(void*, size_t) { return {}; }
 namespace hook { bool install(const ManagedMethod&, void*, void**, bool) { return false; } }
 namespace elfsym { bool find_library(const char*, uintptr_t*) { return false; } }
 int menu_calls=0, update_calls=0, reply_calls=0, load_calls=0;
+int starts=0, completions=0, failures=0;
+void diagnostic(const char* code,const char*,uint64_t revision) {assert(revision>0);if(std::string(code)=="resync_started") ++starts;else if(std::string(code)=="resync_lobby_ready") ++completions;else if(std::string(code)=="resync_failed") ++failures;}
 void menu(void*, const void*) { ++menu_calls; }
 void tick(void*, const void*) { ++update_calls; }
 void answer(void*, void*, void*, const void*) { ++reply_calls; }
@@ -17,6 +19,7 @@ void* scene_new(const char* name) { assert(std::string(name)=="AuthorizationScen
 void* load(void* scene,int mode,const void*) { assert(scene==&scene_token && mode==0);++load_calls;return &scene_token; }
 int main() {
  using namespace admin_resync_2313::detail;
+ client_diagnostics::sink=&diagnostic;
  assert(parse_revision("1")==1 && parse_revision("18446744073709551615")==UINT64_MAX);
  for (auto s : {"", "0", "01", "-1", "1.2", "1x", "18446744073709551616", "123456789012345678901"}) assert(parse_revision(s)==0);
  original_menu_enable=menu;original_update=tick;original_reply=answer;load_scene=load;il2cpp::string_new=scene_new;
@@ -34,5 +37,8 @@ int main() {
  load_scene=load;
  request({"player-b",1});update(nullptr,nullptr);assert(load_calls==3); // Another account may have a lower revision.
  assert(started_revisions["player-b"]==1);
+ assert(starts==3 && completions==2 && failures==0);
+ menu_enable(nullptr,nullptr);request({"player-b",2});load_scene=+[](void*,int,const void*) -> void* {return nullptr;};update(nullptr,nullptr);
+ assert(starts==4 && completions==3 && failures==1);
  assert(!admin_resync_2313::install());
 }

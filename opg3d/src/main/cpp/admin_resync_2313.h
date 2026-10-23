@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <string>
 
+#include "client_diagnostics_sink.h"
 #include "elf_sym.h"
 #include "hook.h"
 #include "il2cpp.h"
@@ -33,6 +34,7 @@ inline std::atomic<bool> boot_completed{false};
 struct Marker { std::string player; uint64_t revision = 0; };
 inline std::mutex request_mutex;
 inline Marker requested;
+inline uint64_t in_flight_revision=0;
 inline std::unordered_map<std::string, uint64_t> started_revisions;
 
 inline uint64_t parse_revision(const std::string& text) {
@@ -111,6 +113,7 @@ inline void reply(void* data, void* context, void* attachments, const void* info
 inline void menu_enable(void* self, const void* info) {
     if (original_menu_enable) original_menu_enable(self, info);
     boot_completed.store(true);
+    if(in_flight_revision) {client_diagnostics::emit("resync_lobby_ready","Lobby ready after authoritative progress reload",in_flight_revision);in_flight_revision=0;}
 }
 
 inline void update(void* self, const void* info) {
@@ -120,13 +123,17 @@ inline void update(void* self, const void* info) {
     const Marker marker = take_request();
     if (!marker.revision) return;
     void* scene = il2cpp::string_new ? il2cpp::string_new("AuthorizationScene") : nullptr;
-    if (!scene) { boot_completed.store(true); return; }
+    if (!scene) { boot_completed.store(true); client_diagnostics::emit("resync_failed","Authorization scene string unavailable",marker.revision); return; }
     LOGI("23.1.3-admin-resync: entering stock authorization scene revision=%llu",
          static_cast<unsigned long long>(marker.revision));
+    client_diagnostics::emit("resync_started","Entering stock authorization scene for authoritative progress reload",marker.revision);
+    in_flight_revision=marker.revision;
     void* operation = load_scene(scene, 0 /* LoadSceneMode.Single */, load_info);
     if (!operation) {
         // No polling/restart loop on a missing or unavailable scene.
         boot_completed.store(true);
+        in_flight_revision=0;
+        client_diagnostics::emit("resync_failed","Authorization scene load unavailable",marker.revision);
         LOGE("23.1.3-admin-resync: scene load unavailable; durable server flag retained");
     }
 }

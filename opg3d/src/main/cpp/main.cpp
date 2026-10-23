@@ -48,6 +48,7 @@
 #include "startup_trace_2313.h"
 #include "startup_clock_2313.h"
 #include "admin_resync_2313.h"
+#include "client_diagnostics_2313.h"
 #include "team_strike_bots_2313.h"
 #include "escort_bots_2313.h"
 #include "bot_aim_2313.h"
@@ -150,6 +151,8 @@ uintptr_t g_runtime_base = 0;
 bool g_signature_compat = false;
 
 void install_runtime_components(uintptr_t base, bool signature_compat) {
+    (void)install_component("diagnostics", "client errors", feature_config::network::backend_redirect,
+        []() { return client_diagnostics_2313::install(); });
     (void)install_component(
         "startup", "Switcher loading clock",
         true,
