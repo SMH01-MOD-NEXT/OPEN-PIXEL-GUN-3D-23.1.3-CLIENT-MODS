@@ -50,3 +50,9 @@ Candidate33 entered Team Strike with3/3 participants (five bots plus human). Aft
 Ordinary Team Fight combat20:31:10 logged mode2, interval100ms, stock6.000→tuned8.358 at60fps, fraction0.139: the softer preset is demonstrably selected outside modes16/17. The same process17023 remained alive across Escort→Team Strike→Team Fight, with no captured Fatal signal/FATAL EXCEPTION. Mode switches used the stock Quit menu.
 
 Local build33 is ready for subjective moving-target playtesting. The automated checks validate safety, scope and bounded tuning; uncontrolled bot kills and logs do not prove a particular hit percentage or difficulty balance. No APK reinstall, account reset, weapon damage/spread change, AWS deployment or network timeout adjustment. Earlier accepted Escort implementation saved separately in commit a358600; unrelated Photon trace and analys2332 work preserved.
+
+## Accepted AWS publication
+
+The user accepted the local gameplay and explicitly authorized AWS publication. On2026-10-23, official Sweden endpoint13.51.187.37:8080 atomically switched from build20 to the same tested signed build33, SHA256 `170c1211bbb5107c7f02fb641caa3a2bbe68c81e0d96859499a0b134d4c20664`, size461680bytes. Public manifest RSA signature and downloaded artifact size/hash verified. Ping and loader info returned200; public admin paths remained404. Backend/gateway stayed active with unchanged PIDs22117/21993; no backend executable, configuration or player-data replacement.
+
+Previous build20 artifact retained; pre-publication manifest/key and a signed monotonic rollback34 manifest stored in root-only AWS backup `aws-release33-20261023-080204`. Rollback was not activated. Existing APKs receive the native payload on the next full launcher start; already-running games do not hot-swap code. No new APK installation is required for these gameplay changes.
