@@ -41,6 +41,7 @@
 #include "photon_2313.h"
 #include "photon_default_plugin_2313.h"
 #include "custom_lobby_2313.h"
+#include "server_store_2313.h"
 #include "runtime_dispatch_2313.h"
 #include "photon_trace_2313.h"
 #include "sio_codec_trace_2313.h"
@@ -277,6 +278,9 @@ void install_runtime_components(uintptr_t base, bool signature_compat) {
     const bool backend_redirect = install_component(
         "network", "backend redirect", feature_config::network::backend_redirect,
         []() { return backend_redirect_2313::install_hooks(); });
+    (void)install_component(
+        "network", "Server store catalog", feature_config::network::backend_redirect,
+        []() { return server_store_2313::install_hooks(); });
     const bool photon_online = install_component(
         "network", "Photon online", feature_config::network::photon_online,
         []() { return photon_2313::install_hooks(); });
