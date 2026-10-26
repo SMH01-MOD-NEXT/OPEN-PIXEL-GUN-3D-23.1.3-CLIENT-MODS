@@ -16,6 +16,7 @@
 #include <poll.h>
 #include <shadowhook.h>
 #include <sys/random.h>
+#include <sys/system_properties.h>
 #include <thread>
 #include <vector>
 namespace {
@@ -684,6 +685,22 @@ void restore_loader_bridges() {
   }
   LOGI("loader: temporary dlopen bridges removed before game startup");
 }
+// Until libil2cpp.so appears, every library load is observed so the gate can
+// be installed before Unity calls il2cpp_init. The observed entry points must
+// keep the linker's caller address intact: the linker picks the namespace
+// (vendor sphal, system default, classloader) from it. Hooking libdl's
+// dlopen/android_dlopen_ext makes this library the caller of every load while
+// the picker is open, so vendor gralloc/EGL helpers (e.g. Qualcomm snapalloc)
+// are not found and the window or WebView cannot allocate buffers.
+// Android 8+: linker exports that take the caller address as an argument.
+void *(*real_loader_dlopen)(const char *, int, const void *) = nullptr;
+void *(*real_loader_android_dlopen_ext)(const char *, int,
+                                        const android_dlextinfo *,
+                                        const void *) = nullptr;
+// Android 7.x: the linker's internal dlopen_ext(..., caller_addr).
+void *(*real_dlopen_ext_n)(const char *, int, const android_dlextinfo *,
+                           const void *) = nullptr;
+// Android 5/6 (no namespaces) and last-resort fallback: libdl entry points.
 void *(*real_dlopen)(const char *, int) = nullptr;
 void *(*real_android_dlopen)(const char *, int,
                              const android_dlextinfo *) = nullptr;
@@ -704,6 +721,24 @@ void install_gate() {
   }
   LOGI("loader: mandatory il2cpp_init gate installed");
 }
+void *loader_open_proxy(const char *name, int flags, const void *caller) {
+  auto result = real_loader_dlopen(name, flags, caller);
+  install_gate();
+  return result;
+}
+void *loader_android_open_proxy(const char *name, int flags,
+                                const android_dlextinfo *ext,
+                                const void *caller) {
+  auto result = real_loader_android_dlopen_ext(name, flags, ext, caller);
+  install_gate();
+  return result;
+}
+void *dlopen_ext_n_proxy(const char *name, int flags,
+                         const android_dlextinfo *ext, const void *caller) {
+  auto result = real_dlopen_ext_n(name, flags, ext, caller);
+  install_gate();
+  return result;
+}
 void *open_proxy(const char *name, int flags) {
   auto result = real_dlopen(name, flags);
   install_gate();
@@ -714,6 +749,66 @@ void *android_open_proxy(const char *name, int flags,
   auto result = real_android_dlopen(name, flags, ext);
   install_gate();
   return result;
+}
+int sdk_level() {
+  char value[PROP_VALUE_MAX] = {};
+  return __system_property_get("ro.build.version.sdk", value) > 0 ? atoi(value)
+                                                                  : 0;
+}
+void *linker_symbol(const char *name, bool symtab) {
+  void *linker = shadowhook_dlopen("linker64");
+  if (!linker)
+    return nullptr;
+  void *address = symtab ? shadowhook_dlsym_symtab(linker, name)
+                         : shadowhook_dlsym(linker, name);
+  shadowhook_dlclose(linker);
+  return address;
+}
+// Returns true when the early-load bridges are installed in a mode that keeps
+// the original caller's linker namespace.
+bool install_caller_preserving_bridges(int sdk) {
+  if (sdk >= 26) {
+    auto a = linker_symbol("__loader_dlopen", false),
+         b = linker_symbol("__loader_android_dlopen_ext", false);
+    if (!a || !b)
+      return false;
+    stub_dlopen = shadowhook_hook_func_addr(
+        a, reinterpret_cast<void *>(loader_open_proxy),
+        reinterpret_cast<void **>(&real_loader_dlopen));
+    if (stub_dlopen)
+      stub_android = shadowhook_hook_func_addr(
+          b, reinterpret_cast<void *>(loader_android_open_proxy),
+          reinterpret_cast<void **>(&real_loader_android_dlopen_ext));
+  } else if (sdk >= 24) {
+    void *a = nullptr;
+    for (auto name : {"__dl__ZL10dlopen_extPKciPK17android_dlextinfoPv",
+                      "__dl__ZL10dlopen_extPKciPK17android_dlextinfoPKv"})
+      if (!a)
+        a = linker_symbol(name, true);
+    if (!a)
+      return false;
+    stub_dlopen = shadowhook_hook_func_addr(
+        a, reinterpret_cast<void *>(dlopen_ext_n_proxy),
+        reinterpret_cast<void **>(&real_dlopen_ext_n));
+    return stub_dlopen != nullptr;
+  } else {
+    return false;
+  }
+  if (stub_dlopen && stub_android)
+    return true;
+  restore_loader_bridges();
+  return false;
+}
+bool install_libdl_bridges() {
+  auto a = dlsym(RTLD_DEFAULT, "dlopen"),
+       b = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
+  return a && b &&
+         (stub_dlopen = shadowhook_hook_func_addr(
+              a, reinterpret_cast<void *>(open_proxy),
+              reinterpret_cast<void **>(&real_dlopen))) &&
+         (stub_android = shadowhook_hook_func_addr(
+              b, reinterpret_cast<void *>(android_open_proxy),
+              reinterpret_cast<void **>(&real_android_dlopen)));
 }
 } // namespace
 static void loader_load() {
@@ -775,18 +870,22 @@ static void loader_load() {
   LOGI("loader: main Looper JNI bridge installed");
   install_gate();
   if (!gate_installed) {
-    auto a = dlsym(RTLD_DEFAULT, "dlopen"),
-         b = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
-    if (!a || !b ||
-        !(stub_dlopen = shadowhook_hook_func_addr(
-              a, reinterpret_cast<void *>(open_proxy),
-              reinterpret_cast<void **>(&real_dlopen))) ||
-        !(stub_android = shadowhook_hook_func_addr(
-              b, reinterpret_cast<void *>(android_open_proxy),
-              reinterpret_cast<void **>(&real_android_dlopen)))) {
-      LOGE("loader: early-load bridge failed");
-      _exit(126);
+    auto sdk = sdk_level();
+    if (install_caller_preserving_bridges(sdk)) {
+      LOGI("loader: caller-preserving early-load bridge installed (sdk %d)",
+           sdk);
+    } else {
+      if (sdk >= 24)
+        LOGW("loader: linker load entry unavailable (sdk %d); libdl bridge "
+             "may hide vendor libraries until Play",
+             sdk);
+      if (!install_libdl_bridges()) {
+        LOGE("loader: early-load bridge failed");
+        _exit(126);
+      }
     }
+    // libil2cpp.so may have been loaded while the bridge was being installed.
+    install_gate();
   }
   // Expansion provisioning must still precede Unity's asset lookup.
   (void)obb_framework_dir::prepare();

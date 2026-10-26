@@ -51,9 +51,29 @@ that key, `.env`, state files or runtime logs.
 6. On Play, fetch and verify the signed manifest, reject incompatible/downgrade
    metadata, then reuse an intact matching cache or download the named artifact.
 7. Verify size, SHA256, AArch64 ELF and explicit payload ABI before starting it.
-   Only then release the game gate. Temporary dlopen bridges are removed first:
-   leaving them installed changes Android vendor linker namespaces and can break
-   GPU driver loading. No loaded library is overwritten or hot-swapped.
+   Only then release the game gate. Temporary dlopen bridges are removed first.
+   No loaded library is overwritten or hot-swapped.
+
+### Early-load bridge and linker namespaces
+
+The loader starts before Unity loads `libil2cpp.so`, so it observes library
+loads until it can gate `il2cpp_init`. The linker chooses the namespace
+(vendor sphal, system default, classloader) from the **caller address**. A proxy
+on libdl `dlopen`/`android_dlopen_ext` makes the loader the caller of every
+load while the picker is open: vendor gralloc/EGL helpers are then not found
+(Qualcomm `snapalloc-impl`, `libubwcp`), the window cannot allocate buffers,
+the WebView reports `Initialization of all EGL display types failed`, and some
+devices (Galaxy S25 Ultra) show a black screen or crash before the picker.
+
+The bridge therefore hooks the linker entries that receive the caller address
+as an argument and passes it through unchanged: `__loader_dlopen` and
+`__loader_android_dlopen_ext` on Android 8+, the linker's internal
+`dlopen_ext(..., caller)` on Android 7.x. Android 5/6 have no namespaces and
+keep the libdl bridge; on 7+ the libdl bridge is only a logged last resort.
+On Nothing A059P (Android 16) the namespace failures that the old bridge
+caused (`libubwcp.so`, `libpenguin.so`, `libdolphin.so`) are gone with the
+new bridge. The fix lives in the APK-resident loader, so existing installs
+need the updated APK; payload updates cannot change it.
 
 The server picker is responsive CSS with safe-area/fullscreen support and a
 mobile single-column layout. Names are inserted as text, never HTML. UI commands
